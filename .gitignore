@@ -76,8 +76,8 @@ Makefile.in
 /src/cockpit.egg-info/
 /src/common/fail.html.c
 /src/systemd/cockpit*.service
-/src/systemd/cockpit*.socket
 /src/systemd/cockpit-tempfiles.conf
+/src/systemd/cockpit.socket
 /src/tls/cockpit-certificate-helper
 /src/ws/cockpit-desktop
 /src/ws/cockpit.appdata.xml
