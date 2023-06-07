@@ -2097,6 +2097,15 @@ class MachineCase(unittest.TestCase):
         m = self.machine
         self.restore_file(path, post_restore_action=post_restore_action)
         m.write(path, content, append=append, owner=owner, perm=perm)
+        
+    
+    def reboot(self, timeout_sec):
+        self.allow_restart_journal_messages()
+        self.machine.reboot(timeout_sec=timeout_sec)
+
+    def wait_reboot(self, timeout_sec):
+        self.allow_restart_journal_messages()
+        self.machine.wait_reboot(timeout_sec=timeout_sec)
 
     def enable_root_login(self):
         """Enable root login
