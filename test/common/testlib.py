@@ -360,10 +360,10 @@ class Browser:
                 return c
         return None
 
-    def go(self, hash: str):
-        self.call_js_func('ph_go', hash)
+    def go(self, url_hash: str):
+        self.call_js_func('ph_go', url_hash)
 
-    def mouse(self, selector: str, type: str, x: int = 0, y: int = 0, btn: int = 0, ctrlKey: bool = False, shiftKey: bool = False, altKey: bool = False, metaKey: bool = False):
+    def mouse(self, selector: str, event: str, x: int = 0, y: int = 0, btn: int = 0, ctrlKey: bool = False, shiftKey: bool = False, altKey: bool = False, metaKey: bool = False):
         """Simulate a browser mouse event
 
         :param selector: the element to interact with
@@ -377,7 +377,7 @@ class Browser:
         :param metaKey: press the meta key
         """
         self.wait_visible(selector)
-        self.call_js_func('ph_mouse', selector, type, x, y, btn, ctrlKey, shiftKey, altKey, metaKey)
+        self.call_js_func('ph_mouse', selector, event, x, y, btn, ctrlKey, shiftKey, altKey, metaKey)
 
     def click(self, selector: str):
         """Click on a ui element
@@ -559,7 +559,7 @@ class Browser:
             def __enter__(self):
                 pass
 
-            def __exit__(self, type, value, traceback):
+            def __exit__(self, type_, value, traceback):
                 browser.cdp.timeout = self.timeout
         r = WaitParamsRestorer(self.cdp.timeout)
         self.cdp.timeout = timeout
@@ -669,19 +669,19 @@ class Browser:
         self.wait_visible(selector)
         self.wait_js_func('ph_text_matches', selector, pattern)
 
-    def wait_popup(self, id: str):
+    def wait_popup(self, elem_id: str):
         """Wait for a popup to open.
 
         :param id: the 'id' attribute of the popup.
         """
-        self.wait_visible('#' + id)
+        self.wait_visible('#' + elem_id)
 
-    def wait_popdown(self, id: str):
+    def wait_popdown(self, elem_id: str):
         """Wait for a popup to close.
 
         :param id: the 'id' attribute of the popup.
         """
-        self.wait_not_visible('#' + id)
+        self.wait_not_visible('#' + elem_id)
 
     def wait_language(self, lang: str):
         parts = lang.split("-")
@@ -868,15 +868,17 @@ class Browser:
 
         self.open_superuser_dialog()
 
+        pf_prefix = "" if self.machine.system_before(293) else "-v5"
+
         if passwordless:
-            self.wait_in_text(".pf-v5-c-modal-box:contains('Administrative access')", "You now have administrative access.")
-            self.click(".pf-v5-c-modal-box button:contains('Close')")
-            self.wait_not_present(".pf-v5-c-modal-box:contains('You now have administrative access.')")
+            self.wait_in_text(f".pf{pf_prefix}-c-modal-box:contains('Administrative access')", "You now have administrative access.")
+            self.click(f".pf{pf_prefix}-c-modal-box button:contains('Close')")
+            self.wait_not_present(f".pf{pf_prefix}-c-modal-box:contains('You now have administrative access.')")
         else:
-            self.wait_in_text(".pf-v5-c-modal-box:contains('Switch to administrative access')", f"Password for {user or 'admin'}:")
-            self.set_input_text(".pf-v5-c-modal-box:contains('Switch to administrative access') input", password or "foobar")
-            self.click(".pf-v5-c-modal-box button:contains('Authenticate')")
-            self.wait_not_present(".pf-v5-c-modal-box:contains('Switch to administrative access')")
+            self.wait_in_text(f".pf{pf_prefix}-c-modal-box:contains('Switch to administrative access')", f"Password for {user or 'admin'}:")
+            self.set_input_text(f".pf{pf_prefix}-c-modal-box:contains('Switch to administrative access') input", password or "foobar")
+            self.click(f".pf{pf_prefix}-c-modal-box button:contains('Authenticate')")
+            self.wait_not_present(f".pf{pf_prefix}-c-modal-box:contains('Switch to administrative access')")
 
         self.check_superuser_indicator("Administrative access")
         self.switch_to_frame(cur_frame)
@@ -885,9 +887,11 @@ class Browser:
         cur_frame = self.cdp.cur_frame
         self.switch_to_top()
 
+        pf_prefix = "" if self.machine.system_before(293) else "-v5"
+
         self.open_superuser_dialog()
-        self.click(".pf-v5-c-modal-box:contains('Switch to limited access') button:contains('Limit access')")
-        self.wait_not_present(".pf-v5-c-modal-box:contains('Switch to limited access')")
+        self.click(f".pf{pf_prefix}-c-modal-box:contains('Switch to limited access') button:contains('Limit access')")
+        self.wait_not_present(f".pf{pf_prefix}-c-modal-box:contains('Switch to limited access')")
         self.check_superuser_indicator("Limited access")
 
         self.switch_to_frame(cur_frame)
@@ -1187,8 +1191,8 @@ class Browser:
         if not (Image and self.pixels_label):
             return
 
-        all = set(glob.glob(os.path.join(TEST_DIR, "reference", self.pixels_label + "*-pixels.png")))
-        unused = all - self.used_pixel_references
+        pixel_references = set(glob.glob(os.path.join(TEST_DIR, "reference", self.pixels_label + "*-pixels.png")))
+        unused = pixel_references - self.used_pixel_references
         for u in unused:
             print("Unused reference image " + os.path.basename(u))
             self.failed_pixel_tests += 1
@@ -1906,10 +1910,10 @@ class MachineCase(unittest.TestCase):
         report = self.browser.eval_js("axe.run()", no_trace=True)
 
         # trim the report
-        def delkeys(dict, *keys):
+        def delkeys(dictionary, *keys):
             for key in keys:
                 try:
-                    del dict[key]
+                    del dictionary[key]
                 except KeyError:
                     pass
         delkeys(report, "passes", "inapplicable", "timestamp")
@@ -1968,7 +1972,7 @@ class MachineCase(unittest.TestCase):
                 sys.stderr.write(traceback.format_exc())
 
     def copy_journal(self, title: str, label: Optional[str] = None):
-        for name, m in self.machines.items():
+        for _, m in self.machines.items():
             if m.ssh_reachable:
                 log = "%s-%s-%s.log.gz" % (label or self.label(), m.label, title)
                 with open(log, "w") as fp:
@@ -1979,7 +1983,7 @@ class MachineCase(unittest.TestCase):
     def copy_cores(self, title: str, label: Optional[str] = None):
         if self.allow_core_dumps:
             return
-        for name, m in self.machines.items():
+        for _, m in self.machines.items():
             if m.ssh_reachable:
                 directory = "%s-%s-%s.core" % (label or self.label(), m.label, title)
                 dest = os.path.abspath(directory)
@@ -2002,7 +2006,7 @@ class MachineCase(unittest.TestCase):
         usage. Wait for up to a minute, then return. There is no error if the
         CPU stays busy, as usually a test then should just try to run anyway.
         """
-        for retry in range(20):
+        for _ in range(20):
             # get the CPU percentage of the most busy process
             busy_proc = self.machine.execute("ps --no-headers -eo pcpu,pid,args | sort -k 1 -n -r | head -n1")
             if float(busy_proc.split()[0]) < 20.0:
@@ -2552,7 +2556,7 @@ def sit(machines={}):
     The current test case is suspended so that the user can inspect
     the browser.
     """
-    for (name, machine) in machines.items():
+    for (_, machine) in machines.items():
         sys.stderr.write(machine.diagnose())
     print("Press RET to continue...")
     sys.stdin.readline()
