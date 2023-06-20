@@ -17,25 +17,25 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
 
-from testlib import MachineCase, nondestructive, skipDistroPackage, test_main, wait
+import testlib
 
 
-@skipDistroPackage()
-@nondestructive
-class TestSession(MachineCase):
+@testlib.skipDistroPackage()
+@testlib.nondestructive
+class TestSession(testlib.MachineCase):
 
     def testBasic(self):
         m = self.machine
         b = self.browser
 
         def wait_session(should_exist):
-            wait(lambda: (should_exist == ("admin" in m.execute("loginctl list-sessions"))))
+            testlib.wait(lambda: (should_exist == ("admin" in m.execute("loginctl list-sessions"))))
 
-        wait_session(False)
+        wait_session(should_exist=False)
 
         # Login
         self.login_and_go("/system")
-        wait_session(True)
+        wait_session(should_exist=True)
 
         # Check session type
         if not m.ostree_image:
@@ -45,26 +45,26 @@ class TestSession(MachineCase):
         # Logout
         b.logout()
         b.wait_visible("#login")
-        wait_session(False)
+        wait_session(should_exist=False)
 
         # Login again
         b.set_val("#login-user-input", "admin")
         b.set_val("#login-password-input", "foobar")
         b.click('#login-button')
         b.enter_page("/system")
-        wait_session(True)
+        wait_session(should_exist=True)
 
         # Kill session from the outside
         m.execute("loginctl terminate-user admin")
-        wait_session(False)
+        wait_session(should_exist=False)
 
         b.relogin("/system", "admin")
-        wait_session(True)
+        wait_session(should_exist=True)
 
         # Kill session from the inside
         b.logout()
-        wait_session(False)
+        wait_session(should_exist=False)
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

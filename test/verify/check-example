@@ -22,31 +22,31 @@ import sys
 import time
 import unittest
 
-from testlib import MachineCase, nondestructive, skipDistroPackage, test_main, todo
+import testlib
 
 
-@skipDistroPackage()
-class TestExample(MachineCase):
+@testlib.skipDistroPackage()
+class TestExample(testlib.MachineCase):
 
     @unittest.expectedFailure
     def testExpectedFail(self):
         self.login_and_go("/system")
-        self.assertFalse(True)
+        self.assertFalse(True)  # noqa: FBT003
 
     def testFail(self):
         self.login_and_go("/system")
         if os.environ.get('TEST_FAILURES'):
-            self.assertFalse(True)
+            self.assertFalse(True)  # noqa: FBT003
 
     @unittest.skip
     def testSkip(self):
         self.login_and_go("/system")
-        self.assertFalse(True)
+        self.assertFalse(True)  # noqa: FBT003
 
     def testRaiseSkip(self):
         raise unittest.SkipTest("dynamic skip")
 
-    @nondestructive
+    @testlib.nondestructive
     def testNondestructive(self):
         self.login_and_go("/system")
 
@@ -54,9 +54,9 @@ class TestExample(MachineCase):
         self.login_and_go("/system")
 
 
-@nondestructive
-@skipDistroPackage()
-class TestNondestructiveExample(MachineCase):
+@testlib.nondestructive
+@testlib.skipDistroPackage()
+class TestNondestructiveExample(testlib.MachineCase):
 
     def testOne(self):
         self.assertEqual(self.machine.execute("whoami").strip(), "root")
@@ -65,7 +65,7 @@ class TestNondestructiveExample(MachineCase):
         self.assertIn("usr", self.machine.execute("ls -l /").strip())
 
 
-@skipDistroPackage()
+@testlib.skipDistroPackage()
 class TestSimple(unittest.TestCase):
 
     def testOne(self):
@@ -75,30 +75,30 @@ class TestSimple(unittest.TestCase):
                 sys.stderr.write(">1%i\n" % i)
             else:
                 print(">2", i)
-        self.assertTrue(True)
+        self.assertTrue(True)  # noqa: FBT003
 
     @unittest.expectedFailure
     def testTwo(self):
-        self.assertFalse(True)
+        self.assertFalse(True)  # noqa: FBT003
 
     def testThree(self):
-        self.assertTrue(True)
+        self.assertTrue(True)  # noqa: FBT003
 
 
-@skipDistroPackage()
+@testlib.skipDistroPackage()
 class TestTodo(unittest.TestCase):
     def setUp(self):
         if not os.environ.get('TEST_TODO'):
             self.skipTest('not testing TestTodo')
 
-    @todo('2 is not yet sufficiently large')
+    @testlib.todo('2 is not yet sufficiently large')
     def testTodoFail(self):
         assert 2 + 2 == 5
 
-    @todo('2 is not yet sufficiently large')
+    @testlib.todo('2 is not yet sufficiently large')
     def testTodoPass(self):
         assert 2 + 2 == 4
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

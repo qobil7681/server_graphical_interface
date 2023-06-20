@@ -30,8 +30,7 @@ def fuser(mount_point):
         # Field two is everything between the first "(" and the last ")", the rest is space separated.
         comm_start = stat.index("(") + 1
         comm_end = stat.rindex(")")
-        return ([stat[0:comm_start - 1].strip(), stat[comm_start:comm_end]] +
-                list(filter(lambda f: f != "", stat[comm_end + 1:-1].split(" "))))
+        return ([stat[0:comm_start - 1].strip(), stat[comm_start:comm_end], *list(filter(lambda f: f != '', stat[comm_end + 1:-1].split(' ')))])
 
     def get_loginuser(pid):
         uid = os.stat("/proc/%s" % pid).st_uid
@@ -46,9 +45,9 @@ def fuser(mount_point):
             unit = systemd_manager.GetUnitByPID(int(pid))
             if unit not in results:
                 unit_obj = bus.get_object('org.freedesktop.systemd1', unit)
-                id = unit_obj.Get("org.freedesktop.systemd1.Unit", "Id",
-                                  dbus_interface="org.freedesktop.DBus.Properties")
-                if id.endswith(".scope"):
+                unit_id = unit_obj.Get("org.freedesktop.systemd1.Unit", "Id",
+                                       dbus_interface="org.freedesktop.DBus.Properties")
+                if unit_id.endswith(".scope"):
                     stat = get_stat(pid)
                     start = int(stat[21]) / os.sysconf('SC_CLK_TCK')
                     results[pid] = {"pid": int(pid),
@@ -61,7 +60,7 @@ def fuser(mount_point):
                                         dbus_interface="org.freedesktop.DBus.Properties")
                     timestamp = unit_obj.Get("org.freedesktop.systemd1.Unit", "ActiveEnterTimestamp",
                                              dbus_interface="org.freedesktop.DBus.Properties")
-                    results[unit] = {"unit": id,
+                    results[unit] = {"unit": unit_id,
                                      "cmd": get_cmdline(pid),
                                      "desc": desc,
                                      "user": get_loginuser(pid),
@@ -141,7 +140,7 @@ def stop_pids(pids):
 
 def stop_units(units):
     if len(units) > 0:
-        subprocess.check_call(["systemctl", "stop"] + units)
+        subprocess.check_call(['systemctl', 'stop', *units])
 
 
 def stop(users):

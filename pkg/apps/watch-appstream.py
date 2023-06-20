@@ -103,7 +103,7 @@ def element_value(xml, tag):
     return elt.text if elt is not None else None
 
 
-def convert_description(xml, use_lang=True):
+def convert_description(xml, *, use_lang=True):
     if xml is None:
         return None
 
@@ -134,16 +134,16 @@ def convert_description(xml, use_lang=True):
 
     # If we found nothing that matches lang, fall back to default
     if lang is not None and len(res) == 0:
-        res = convert_description(xml, False)
+        res = convert_description(xml, use_lang=False)
 
     return res
 
 
-def convert_cached_icon(dir, origin, xml):
+def convert_cached_icon(directory, origin, xml):
     icon = xml.text
 
     def try_size(sz):
-        path = os.path.join(dir, "..", "icons", origin, sz, icon)
+        path = os.path.join(directory, "..", "icons", origin, sz, icon)
         return path if os.path.exists(path) else None
 
     return try_size("64x64") or try_size("128x128")
@@ -163,7 +163,7 @@ def convert_local_icon(xml):
     return None
 
 
-def find_and_convert_icon(dir, origin, xml):
+def find_and_convert_icon(directory, origin, xml):
     if xml is None:
         return None
 
@@ -172,7 +172,7 @@ def find_and_convert_icon(dir, origin, xml):
 
     if icon is not None:
         if icon.attrib['type'] == 'cached':
-            return convert_cached_icon(dir, origin, icon)
+            return convert_cached_icon(directory, origin, icon)
         elif icon.attrib['type'] == 'remote':
             return convert_remote_icon(icon)
         elif icon.attrib['type'] == 'local':
@@ -198,9 +198,9 @@ def convert_launchables(xml):
     ables = []
 
     for elt in xml.iter('launchable'):
-        type = elt.attrib['type']
-        if type == "cockpit-manifest":
-            ables.append({'name': elt.text, 'type': type})
+        launchable_type = elt.attrib['type']
+        if launchable_type == "cockpit-manifest":
+            ables.append({'name': elt.text, 'type': launchable_type})
 
     return ables
 
@@ -214,22 +214,22 @@ def convert_urls(xml):
     return urls
 
 
-def convert_collection_component(dir, origin, xml):
-    id = element_value(xml, 'id')
+def convert_collection_component(directory, origin, xml):
+    component_id = element_value(xml, 'id')
     pkgname = element_value(xml, 'pkgname')
     launchables = convert_launchables(xml)
     urls = convert_urls(xml)
 
-    if not id or not pkgname or len(launchables) == 0:
+    if not component_id or not pkgname or len(launchables) == 0:
         return None
 
     return {
-        'id': id,
+        'id': component_id,
         'pkgname': pkgname,
         'name': element_value(xml, 'name'),
         'summary': element_value(xml, 'summary'),
         'description': convert_description(element(xml, 'description')),
-        'icon': find_and_convert_icon(dir, origin, xml),
+        'icon': find_and_convert_icon(directory, origin, xml),
         'screenshots': convert_screenshots(element(xml, 'screenshots')),
         'launchables': launchables,
         'urls': urls
@@ -305,8 +305,8 @@ class MetainfoDB:
             else:
                 comps[comp['id']] = comp
         for file in self.available_by_file:
-            for id in self.available_by_file[file]:
-                comp = self.available_by_file[file][id]
+            for comp_id in self.available_by_file[file]:
+                comp = self.available_by_file[file][comp_id]
                 if comp['id'] not in comps:
                     comps[comp['id']] = comp
                 else:

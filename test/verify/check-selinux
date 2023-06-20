@@ -19,17 +19,8 @@
 
 import time
 
+import testlib
 from lib.constants import TEST_OS_DEFAULT
-from testlib import (
-    Error,
-    MachineCase,
-    nondestructive,
-    skipBrowser,
-    skipDistroPackage,
-    skipImage,
-    skipOstree,
-    test_main,
-)
 
 FIX_AUDITD = """
 set -e
@@ -65,16 +56,16 @@ mv -f ~/.ssh/authorized_keys.test-avc ~/.ssh/authorized_keys
 """
 
 
-@skipDistroPackage()
-class TestSelinux(MachineCase):
+@testlib.skipDistroPackage()
+class TestSelinux(testlib.MachineCase):
     provision = {
         "0": {"memory_mb": 768},
         "ansible_machine": {"image": TEST_OS_DEFAULT, "memory_mb": 512}
     }
 
-    @skipImage("No setroubleshoot", "debian-*", "ubuntu-*", "arch")
-    @skipOstree("No setroubleshoot")
-    @skipBrowser("Firefox needs http to access clipboard", "firefox")
+    @testlib.skipImage("No setroubleshoot", "debian-*", "ubuntu-*", "arch")
+    @testlib.skipOstree("No setroubleshoot")
+    @testlib.skipBrowser("Firefox needs http to access clipboard", "firefox")
     def testTroubleshootAlerts(self):
         b = self.browser
         m = self.machine
@@ -216,7 +207,7 @@ class TestSelinux(MachineCase):
 
             # and the button should not come back
             b.wait_not_present(btn_sel)
-        except Error:
+        except testlib.Error:
             print("==== sealert -l '*' ====")
             print(m.execute("sealert -l '*'"))
             print("==== audit.log  ====")
@@ -313,11 +304,11 @@ class TestSelinux(MachineCase):
         b.wait_text("ul[aria-label='System modifications']", "The logged in user is not permitted to view system modifications")
 
 
-@skipDistroPackage()
-@skipImage("No cockpit-selinux", "debian-*", "ubuntu-*", "arch")
-@skipOstree("No cockpit-selinux")
-@nondestructive
-class TestSelinuxEnforcing(MachineCase):
+@testlib.skipDistroPackage()
+@testlib.skipImage("No cockpit-selinux", "debian-*", "ubuntu-*", "arch")
+@testlib.skipOstree("No cockpit-selinux")
+@testlib.nondestructive
+class TestSelinuxEnforcing(testlib.MachineCase):
     def test(self):
         b = self.browser
         m = self.machine
@@ -334,13 +325,13 @@ class TestSelinuxEnforcing(MachineCase):
                 b.wait_visible(".pf-v5-c-switch__input" + (active and ":checked" or ":not(:checked)"))
 
         # SELinux should be enabled and enforcing at the beginning
-        assertEnforce(True)
+        assertEnforce(active=True)
         self.addCleanup(m.execute, "setenforce 1")
         m.execute("getenforce | grep -q 'Enforcing'")
 
         # now set to permissive using the ui button
         b.click(".pf-v5-c-switch__input")
-        assertEnforce(False)
+        assertEnforce(active=False)
         m.execute("getenforce | grep -q 'Permissive'")
 
         # when in permissive mode, expect a warning
@@ -348,7 +339,7 @@ class TestSelinuxEnforcing(MachineCase):
 
         # switch back using cli, ui should react
         m.execute("setenforce 1")
-        assertEnforce(True)
+        assertEnforce(active=True)
 
         # warning should disappear
         b.wait_not_in_text("div.selinux-policy-ct", "Setting deviates")
@@ -365,9 +356,9 @@ class TestSelinuxEnforcing(MachineCase):
         b.switch_to_top()
         b.go("/selinux")
         b.enter_page("/selinux")
-        assertEnforce(False)
+        assertEnforce(active=False)
         b.wait_in_text("div.selinux-policy-ct", "Setting deviates")
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

@@ -1274,13 +1274,13 @@ class _DebugOutcome(unittest.case._Outcome):  # type: ignore[name-defined]
                 if exc_info:
                     assert err_case == test_case
                     setattr(test_case, "_ran_debug", True)
-                    failureHandler(exc_info, False)
+                    failureHandler(exc_info, python_311=False)
         elif self.result.errors or self.result.failures:
             errors = [err for err in itertools.chain(self.result.errors, self.result.failures) if err[0] == test_case]
             if errors:
                 (err_case, exc_info) = errors[-1]
                 setattr(test_case, "_ran_debug", True)
-                failureHandler(exc_info, True)
+                failureHandler(exc_info, python_311=True)
 
         return superResult
 
@@ -1320,10 +1320,10 @@ class MachineCase(unittest.TestCase):
     def kill_global_machine(cls):
         if cls.global_machine:
             cls.global_machine.kill()
+            cls.global_machine = None
 
     def label(self):
-        (unused, sep, label) = self.id().partition(".")
-        return label.replace(".", "-")
+        return self.__class__.__name__ + '-' + self._testMethodName
 
     def new_machine(self, image=None, forward={}, restrict=True, cleanup=True, **kwargs):
         machine_class = self.machine_class
@@ -1384,6 +1384,9 @@ class MachineCase(unittest.TestCase):
             result = self.defaultTestResult()
             errors = result.errors
             self._feedErrorsToResult(result, self._outcome.errors)
+        elif hasattr(self._outcome, 'result') and hasattr(self._outcome.result, '_excinfo'):
+            # pytest emulating unittest
+            return self._outcome.result._excinfo is None
         else:
             # Python 3.11+ now records errors and failures seperate
             errors = self._outcome.result.errors + self._outcome.result.failures
@@ -1457,6 +1460,7 @@ class MachineCase(unittest.TestCase):
                 raise unittest.SkipTest("Cannot provision machines if test is marked as nondestructive")
             self.machine = self.machines['machine1'] = MachineCase.get_global_machine()
         else:
+            MachineCase.kill_global_machine()
             first_machine = True
             # First create all machines, wait for them later
             for key in sorted(provision.keys()):
@@ -2066,9 +2070,15 @@ class MachineCase(unittest.TestCase):
             self.addCleanup(self.machine.execute, post_restore_action)
 
         if reboot_safe:
-            self.addCleanup(self.machine.execute, "rm -rf {0}; mv {1} {0}".format(path, backup))
+            self.addCleanup(self.machine.execute, f"rm -rf {path}; mv {backup} {path}")
         else:
-            self.addCleanup(self.machine.execute, "umount -lf " + path)
+            # HACK: a lot of tests call this on /home/...; that restoration happens before killing all user
+            # processes in nonDestructiveSetup(), so we have to do it lazily
+            if path.startswith("/home"):
+                cmd = f"umount -lf {path}"
+            else:
+                cmd = f"umount {path} || {{ fuser -uvk {path}/* || true; sleep 1; umount {path}; }}"
+            self.addCleanup(self.machine.execute, cmd)
 
     def restore_file(self, path: str, post_restore_action: Optional[str] = None):
         """Backup/restore a file for a nondestructive test

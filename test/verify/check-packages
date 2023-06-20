@@ -17,7 +17,7 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
 
-from testlib import MachineCase, nondestructive, test_main
+import testlib
 
 test_manifest = """
 {
@@ -47,8 +47,8 @@ test_html = """
 """
 
 
-@nondestructive
-class TestPackages(MachineCase):
+@testlib.nondestructive
+class TestPackages(testlib.MachineCase):
 
     def testBasic(self):
         m = self.machine
@@ -70,7 +70,7 @@ class TestPackages(MachineCase):
 
         self.login_and_go("/playground/pkgs")
 
-        check_nav_entry("Terminal", True)
+        check_nav_entry("Terminal", present=True)
 
         m.write("/usr/local/share/cockpit/test/manifest.json", test_manifest)
         m.write("/usr/local/share/cockpit/test/test.html", test_html)
@@ -84,7 +84,7 @@ class TestPackages(MachineCase):
 
         m.execute("rm -rf /usr/local/share/cockpit/test")
         reload_packages()
-        check_nav_entry("Test", False)
+        check_nav_entry("Test", present=False)
 
         # Hide the terminal with a system override
         m.write("/etc/cockpit/systemd.override.json", """{
@@ -93,7 +93,7 @@ class TestPackages(MachineCase):
     }
 }""")
         reload_packages()
-        check_nav_entry("Terminal", False)
+        check_nav_entry("Terminal", present=False)
 
         # user override on top which renames the services label
         self.restore_dir("/home/admin")
@@ -103,11 +103,11 @@ class TestPackages(MachineCase):
     }
 }""")
         reload_packages()
-        check_nav_entry("Services", False)
-        check_nav_entry("Hackices", True)
+        check_nav_entry("Services", present=False)
+        check_nav_entry("Hackices", present=True)
         # it adds to, not replaces the /etc override
-        check_nav_entry("Terminal", False)
+        check_nav_entry("Terminal", present=False)
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

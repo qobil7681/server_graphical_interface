@@ -17,11 +17,11 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
 
+import testlib
 from lib.constants import TEST_OS_DEFAULT
-from testlib import MachineCase, nondestructive, skipDistroPackage, skipImage, skipOstree, test_main, timeout
 
 
-class KdumpHelpers(MachineCase):
+class KdumpHelpers(testlib.MachineCase):
     def enableKdump(self):
         # all current Fedora/CentOS/RHEL images use BootLoaderSpec
         self.machine.execute("grubby --args=crashkernel=256M --update-kernel=ALL")
@@ -48,10 +48,10 @@ class KdumpHelpers(MachineCase):
         self.machine.wait_boot(timeout_sec=300)
 
 
-@skipOstree("kexec-tools not installed")
-@skipImage("kexec-tools not installed", "debian-*", "ubuntu-*", "arch")
-@timeout(900)
-@skipDistroPackage()
+@testlib.skipOstree("kexec-tools not installed")
+@testlib.skipImage("kexec-tools not installed", "debian-*", "ubuntu-*", "arch")
+@testlib.timeout(900)
+@testlib.skipDistroPackage()
 class TestKdump(KdumpHelpers):
 
     def enableLocalSsh(self):
@@ -76,7 +76,7 @@ class TestKdump(KdumpHelpers):
         if m.image.startswith("rhel-") or m.image in ["centos-8-stream"]:
             # some OSes have kdump enabled by default (crashkernel=auto)
             b.wait_in_text("#app", "Service is running")
-            assertActive(True)
+            assertActive(active=True)
         else:
             # crashkernel command line not set
             b.wait_visible(".pf-v5-c-switch__input:disabled")
@@ -93,7 +93,7 @@ class TestKdump(KdumpHelpers):
                 # service should indicate an error
                 b.wait_in_text("#app", "Service has an error")
             # ... and the button should be off
-            assertActive(False)
+            assertActive(active=False)
 
         # there shouldn't be any crash reports in the target directory
         self.assertEqual(m.execute("find /var/crash -maxdepth 1 -mindepth 1 -type d"), "")
@@ -140,7 +140,7 @@ class TestKdump(KdumpHelpers):
         b.wait_in_text("#app", "256 MiB")
         # service should start up properly and the button should be on
         b.wait_in_text("#app", "Service is running")
-        assertActive(True)
+        assertActive(active=True)
         b.wait_in_text("#app", "Service is running")
         b.wait_text("#kdump-change-target", "Remote over SSH")
 
@@ -165,14 +165,14 @@ class TestKdump(KdumpHelpers):
         # service has to restart after changing the config, wait for it to be running
         # otherwise the button to test will be disabled
         b.wait_in_text("#app", "Service is running")
-        assertActive(True)
+        assertActive(active=True)
 
         # crash the kernel and make sure it wrote a report into the right directory
         self.crashKernel()
         m.execute(f"until test -e {customPath}/127.0.0.1*/vmcore; do sleep 1; done", timeout=180)
         self.assertIn("Kdump compressed dump", m.execute(f"file {customPath}/127.0.0.1*/vmcore"))
 
-    @nondestructive
+    @testlib.nondestructive
     def testConfiguration(self):
         b = self.browser
         m = self.machine
@@ -237,13 +237,13 @@ class TestKdump(KdumpHelpers):
         current = m.execute("grep '^core_collector' /etc/kdump.conf").strip()
         b.click("#kdump-change-target")
         b.wait_visible("#kdump-settings-dialog")
-        b.set_checked("#kdump-settings-compression", True)
+        b.set_checked("#kdump-settings-compression", val=True)
         b.click("button:contains('Save')")
         b.wait_not_present("#kdump-settings-dialog")
         conf = m.execute("cat /etc/kdump.conf")
         self.assertIn(current + " -c", conf)
 
-    @nondestructive
+    @testlib.nondestructive
     def testConfigurationSUSE(self):
         b = self.browser
         m = self.machine
@@ -345,14 +345,14 @@ class TestKdump(KdumpHelpers):
         self.assertIn('KDUMP_DUMPFORMAT=compressed', conf)
         b.click("#kdump-change-target")
         b.wait_visible("#kdump-settings-dialog")
-        b.set_checked("#kdump-settings-compression", False)
+        b.set_checked("#kdump-settings-compression", val=False)
         b.click("button:contains('Save')")
         b.wait_not_present("#kdump-settings-dialog")
         conf = m.execute("cat /etc/sysconfig/kdump")
         self.assertIn('KDUMP_DUMPFORMAT=ELF', conf)
         b.click("#kdump-change-target")
         b.wait_visible("#kdump-settings-dialog")
-        b.set_checked("#kdump-settings-compression", True)
+        b.set_checked("#kdump-settings-compression", val=True)
         b.click("button:contains('Save')")
         b.wait_not_present("#kdump-settings-dialog")
         conf = m.execute("cat /etc/sysconfig/kdump")
@@ -371,10 +371,10 @@ class TestKdump(KdumpHelpers):
         b.wait_text("#kdump-target-info", "Remote over CIFS/SMB")
 
 
-@skipOstree("kexec-tools not installed")
-@skipImage("kexec-tools not installed", "debian-*", "ubuntu-*", "arch")
-@timeout(900)
-@skipDistroPackage()
+@testlib.skipOstree("kexec-tools not installed")
+@testlib.skipImage("kexec-tools not installed", "debian-*", "ubuntu-*", "arch")
+@testlib.timeout(900)
+@testlib.skipDistroPackage()
 class TestKdumpNFS(KdumpHelpers):
     provision = {
         "0": {"address": "10.111.113.1/24", "memory_mb": 1024},
@@ -454,4 +454,4 @@ class TestKdumpNFS(KdumpHelpers):
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()
