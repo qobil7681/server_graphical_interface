@@ -133,7 +133,7 @@ account    required     pam_succeed_if.so user ingroup %s""" % m.get_admin_group
         b.wait_text("#account-user-name", "admin")
         try:
             m.execute("journalctl -p 7 SYSLOG_IDENTIFIER=cockpit-ws | grep 'cockpit-session: opening pam session'")
-            assert False, "cockpit-session debug messages found"
+            self.fail("cockpit-session debug messages found")
         except subprocess.CalledProcessError:
             pass
 
@@ -801,7 +801,7 @@ matchrule = <SUBJECT>^DC=LAN,DC=COCKPIT,CN=alice$
         # we don't want to completely pinpoint the OS list to avoid lockstep image refreshes+cockpit PRs
         # and spontaneous packit test failures as sssd 2.6.1 goes into more distros; but make sure we hit
         # this code path on some known-good ones
-        if m.image.startswith("fedora") or m.image in ["debian-testing"]:
+        if m.image.startswith("fedora") or m.image.startswith("debian"):
             self.assertTrue(has_validate_api)
 
         if has_validate_api:
@@ -824,12 +824,12 @@ matchrule = <SUBJECT>^DC=LAN,DC=COCKPIT,CN=alice$
         # certificates; it just rejects cert requests. For interactive tests, grab src/tls/ca/alice.p12 and import
         # it into the browser.
 
-        def do_test(authopts, expected, not_expected=[], session_leader=None):
+        def do_test(authopts, expected, not_expected=None, session_leader=None):
             m.start_cockpit(tls=True)
             output = m.execute(['curl', '-ksS', '-D-', *authopts, 'https://localhost:9090/cockpit/login'])
             for s in expected:
                 self.assertIn(s, output)
-            for s in not_expected:
+            for s in (not_expected or []):
                 self.assertNotIn(s, output)
             # sessions/users often hang around in State=closing for a long time, ignore these
             if session_leader:

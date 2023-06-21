@@ -995,12 +995,15 @@ class Browser:
                 self._set_window_size(shell_size[0] + delta[0], shell_size[1] + delta[1])
 
     def assert_pixels_in_current_layout(self, selector: str, key: str,
-                                        ignore: List[str] = [],
+                                        ignore: List[str] = None,
                                         mock: Optional[Dict[str, str]] = None,
                                         sit_after_mock: bool = False,
                                         scroll_into_view: Optional[str] = None,
                                         wait_animations: bool = True):
         """Compare the given element with its reference in the current layout"""
+
+        if ignore is None:
+            ignore = []
 
         if not (Image and self.pixels_label):
             return
@@ -1040,17 +1043,18 @@ class Browser:
         rect = self.call_js_func('ph_element_clip', selector)
 
         def relative_clips(sels):
-            return list(map(lambda r: (r['x'] - rect['x'],
-                                       r['y'] - rect['y'],
-                                       r['x'] - rect['x'] + r['width'],
-                                       r['y'] - rect['y'] + r['height']),
-                            self.call_js_func('ph_selector_clips', sels)))
+            return [(
+                    r['x'] - rect['x'],
+                    r['y'] - rect['y'],
+                    r['x'] - rect['x'] + r['width'],
+                    r['y'] - rect['y'] + r['height'])
+                    for r in self.call_js_func('ph_selector_clips', sels)]
 
         reference_dir = os.path.join(TEST_DIR, 'reference')
         if not os.path.exists(os.path.join(reference_dir, '.git')):
             raise SystemError("Pixel test references are missing, please run: test/common/pixel-tests pull")
 
-        ignore_rects = relative_clips(list(map(lambda item: selector + " " + item, ignore)))
+        ignore_rects = relative_clips([f"{selector} {item}" for item in ignore])
         base = self.pixels_label + "-" + key
         if self.current_layout != self.layouts[0]:
             base += "-" + self.current_layout["name"]
@@ -1148,14 +1152,20 @@ class Browser:
                 self.failed_pixel_tests += 1
 
     def assert_pixels(self, selector: str, key: str,
-                      ignore: List[str] = [],
+                      ignore: Optional[List[str]] = None,
                       mock: Optional[Dict[str, str]] = None,
                       sit_after_mock: bool = False,
-                      skip_layouts: List[str] = [],
+                      skip_layouts: Optional[List[str]] = None,
                       scroll_into_view: Optional[str] = None,
                       wait_animations: bool = True,
                       wait_delay: float = 0.5):
         """Compare the given element with its reference in all layouts"""
+
+        if ignore is None:
+            ignore = []
+
+        if skip_layouts is None:
+            skip_layouts = []
 
         if not (Image and self.pixels_label):
             return
@@ -1325,7 +1335,7 @@ class MachineCase(unittest.TestCase):
     def label(self):
         return self.__class__.__name__ + '-' + self._testMethodName
 
-    def new_machine(self, image=None, forward={}, restrict=True, cleanup=True, **kwargs):
+    def new_machine(self, image=None, forward=None, restrict=True, cleanup=True, **kwargs):
         machine_class = self.machine_class
         if opts.address:
             if forward:
@@ -1345,7 +1355,7 @@ class MachineCase(unittest.TestCase):
                 if cleanup:
                     self.addCleanup(network.kill)
                 self.network = network
-            networking = self.network.host(restrict=restrict, forward=forward)
+            networking = self.network.host(restrict=restrict, forward=forward or {})
             machine = machine_class(verbose=opts.trace, networking=networking, image=image, **kwargs)
             if opts.fetch and not os.path.exists(machine.image_file):
                 machine.pull(machine.image_file)
@@ -2559,13 +2569,16 @@ def wait(func: Callable, msg: Optional[str] = None, delay: int = 1, tries: int =
     raise Error(msg or "Condition did not become true.")
 
 
-def sit(machines={}):
+def sit(machines=None):
     """
     Wait until the user confirms to continue.
 
     The current test case is suspended so that the user can inspect
     the browser.
     """
+
+    assert machines is None, "No machines found to sit in"
+
     for (_, machine) in machines.items():
         sys.stderr.write(machine.diagnose())
     print("Press RET to continue...")
