@@ -34,11 +34,16 @@ import { VDODetails } from "./vdo-details.jsx";
 import { NFSDetails } from "./nfs-details.jsx";
 import { StratisPoolDetails, StratisStoppedPoolDetails } from "./stratis-details.jsx";
 import { JobsPanel } from "./jobs-panel.jsx";
+import { SmartDetails } from "./smart-details.jsx";
 
 const _ = cockpit.gettext;
 
 export class StdDetailsLayout extends React.Component {
     render() {
+        const client = this.props.client;
+        const drive = this.props.drive;
+        const drive_ata = client.drives_ata[drive.path];
+
         if (this.props.sidebar) {
             return (
                 <>
@@ -73,6 +78,11 @@ export class StdDetailsLayout extends React.Component {
                         </div>
                         <JobsPanel client={this.props.client} />
                     </StackItem>
+                    { drive_ata &&
+                        <StackItem>
+                            <SmartDetails smartInfo={drive_ata} />
+                        </StackItem>
+                    }
                 </>
             );
         }
