@@ -92,6 +92,6 @@ export class DriveDetails extends React.Component {
 
         const content = <Block client={this.props.client} block={drive_block} />;
 
-        return <StdDetailsLayout client={this.props.client} header={header} content={content} />;
+        return <StdDetailsLayout client={this.props.client} drive={drive} header={header} content={content} />;
     }
 }
