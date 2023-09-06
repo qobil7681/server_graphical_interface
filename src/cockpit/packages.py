@@ -17,7 +17,6 @@
 
 import collections
 import contextlib
-import functools
 import gzip
 import json
 import logging
@@ -26,11 +25,12 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Callable, ClassVar, Dict, Iterable, List, NamedTuple, Optional, Pattern, Sequence, Tuple, TypeVar
+from typing import Callable, ClassVar, Dict, Iterable, List, NamedTuple, Optional, Pattern, Sequence, Tuple
 
 from cockpit._vendor.systemd_ctypes import bus
 
 from . import config
+from ._paths import libexecdir
 from ._version import __version__
 from .jsonutil import (
     JsonDocument,
@@ -42,6 +42,8 @@ from .jsonutil import (
     get_objv,
     get_str,
     get_strv,
+    merge_patch,
+    patch_strings,
     typechecked,
 )
 
@@ -259,69 +261,25 @@ class PackagesLoader:
         'path-not-exists': lambda p: not os.path.exists(p),
     }
 
-    @staticmethod
-    @functools.lru_cache()
-    def get_libexecdir() -> str:
-        """Detect libexecdir on current machine
-
-        This only works for systems which have cockpit-ws installed.
-        """
-        for candidate in ['/usr/local/libexec', '/usr/libexec', '/usr/local/lib/cockpit', '/usr/lib/cockpit']:
-            if os.path.exists(os.path.join(candidate, 'cockpit-askpass')):
-                return candidate
-        else:
-            logger.warning('Could not detect libexecdir')
-            # give readable error messages
-            return '/nonexistent/libexec'
-
-    # HACK: Type narrowing over Union types is not supported in the general case,
-    # but this works for the case we care about: knowing that when we pass in an
-    # JsonObject, we'll get an JsonObject back.
-    J = TypeVar('J', JsonObject, JsonDocument)
-
     @classmethod
-    def patch_libexecdir(cls, obj: J) -> J:
-        if isinstance(obj, str):
-            if '${libexecdir}/cockpit-askpass' in obj:
-                # extra-special case: we handle this internally
-                abs_askpass = shutil.which('cockpit-askpass')
-                if abs_askpass is not None:
-                    return obj.replace('${libexecdir}/cockpit-askpass', abs_askpass)
-            return obj.replace('${libexecdir}', cls.get_libexecdir())
-        elif isinstance(obj, dict):
-            return {key: cls.patch_libexecdir(value) for key, value in obj.items()}
-        elif isinstance(obj, list):
-            return [cls.patch_libexecdir(item) for item in obj]
-        else:
-            return obj
+    def patch_libexecdir(cls, value: str) -> str:
+        if '${libexecdir}' not in value:
+            return value
 
-    @classmethod
-    def get_xdg_data_dirs(cls) -> Iterable[str]:
-        try:
-            yield os.environ['XDG_DATA_HOME']
-        except KeyError:
-            yield os.path.expanduser('~/.local/share')
+        # normal case after `make install`
+        if libexecdir is not None:
+            return value.replace('${libexecdir}', libexecdir)
 
-        try:
-            yield from os.environ['XDG_DATA_DIRS'].split(':')
-        except KeyError:
-            yield from ('/usr/local/share', '/usr/share')
+        # for pure wheel installs, look in the path on a file-by-file basis
+        before, sep, after = value.partition('${libexecdir}/')
+        if sep:
+            abspath = shutil.which(after)
+            if abspath:
+                return f'{before}{abspath}'
 
-    # https://www.rfc-editor.org/rfc/rfc7386
-    @classmethod
-    def merge_patch(cls, target: JsonDocument, patch: J) -> J:
-        # Loosely based on example code from the RFC
-        if not isinstance(patch, dict):
-            return patch
-
-        # Always take a copy ('result') — we never modify the input ('target')
-        result = dict(target if isinstance(target, dict) else {})
-        for name, value in patch.items():
-            if value is not None:
-                result[name] = cls.merge_patch(result.get(name), value)
-            else:
-                result.pop(name)
-        return result
+        # bzzt.
+        logger.warning('Could not expand %s', value)
+        return value.replace('${libexecdir}', '/nonexistent/libexec')
 
     @classmethod
     def patch_manifest(cls, manifest: JsonObject, parent: Path) -> JsonObject:
@@ -344,9 +302,21 @@ class PackagesLoader:
                 logger.warning('%s: override file is not a dictionary', override_file)
                 continue
 
-            manifest = cls.merge_patch(manifest, override)
+            manifest = merge_patch(manifest, override)
 
-        return cls.patch_libexecdir(manifest)
+        return patch_strings(manifest, cls.patch_libexecdir)
+
+    @classmethod
+    def get_xdg_data_dirs(cls) -> Iterable[str]:
+        try:
+            yield os.environ['XDG_DATA_HOME']
+        except KeyError:
+            yield os.path.expanduser('~/.local/share')
+
+        try:
+            yield from os.environ['XDG_DATA_DIRS'].split(':')
+        except KeyError:
+            yield from ('/usr/local/share', '/usr/share')
 
     @classmethod
     def load_manifests(cls) -> Iterable[Manifest]:
