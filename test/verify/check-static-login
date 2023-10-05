@@ -163,10 +163,10 @@ account    required     pam_succeed_if.so user ingroup %s""" % m.get_admin_group
         b.open("/system")
         b.wait_visible("#option-group")
 
-        # And now we remove cockpit-ssh which affects the default
+        # And now we remove ssh which affects the default
         if not m.ostree_image:
-            self.restore_file(f"{self.libexecdir}/cockpit-ssh")
-            m.execute(f"rm {self.libexecdir}/cockpit-ssh")
+            self.restore_file("/usr/bin/ssh")
+            m.execute("rm /usr/bin/ssh")
             m.restart_cockpit()
             b.open("/system")
             b.wait_visible("#login")
@@ -965,10 +965,7 @@ matchrule = <SUBJECT>^DC=LAN,DC=COCKPIT,CN=alice$
 
         # this matches our bots test VMs
         my_ip = "172.27.0.15"
-        m.write("/etc/cockpit/cockpit.conf", """
-[Ssh-Login]
-Command = /usr/bin/env python3 -m cockpit.beiboot
-""", append=True)
+
         m.start_cockpit()
 
         def try_login(user, password, server=None, expect_hostkey=False):
