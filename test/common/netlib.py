@@ -31,7 +31,7 @@ class NetworkHelpers:
         """
         if dhcp_range is None:
             dhcp_range = ['10.111.112.2', '10.111.127.254']
-        self.machine.execute(r"""set -e
+        self.machine.execute(r"""
             mkdir -p /run/udev/rules.d/
             echo 'ENV{ID_NET_DRIVER}=="veth", ENV{INTERFACE}=="%(name)s", ENV{NM_UNMANAGED}="0"' > /run/udev/rules.d/99-nm-veth-%(name)s-test.rules
             udevadm control --reload
@@ -40,13 +40,13 @@ class NetworkHelpers:
             udevadm trigger --subsystem-match=net
             udevadm settle
             """ % {"name": name})
-        self.addCleanup(self.machine.execute, "rm /run/udev/rules.d/99-nm-veth-{0}-test.rules; ip link del dev {0}".format(name))
+        self.addCleanup(self.machine.execute, f"rm /run/udev/rules.d/99-nm-veth-{name}-test.rules; ip link del dev {name}")
         if dhcp_cidr:
             # up the remote end, give it an IP, and start DHCP server
-            self.machine.execute("ip a add {0} dev v_{1}; ip link set v_{1} up".format(dhcp_cidr, name))
+            self.machine.execute(f"ip a add {dhcp_cidr} dev v_{name}; ip link set v_{name} up")
             server = self.machine.spawn("dnsmasq --keep-in-foreground --log-queries --log-facility=- "
-                                        "--conf-file=/dev/null --dhcp-leasefile=/tmp/leases.{0} --no-resolv "
-                                        "--bind-interfaces --except-interface=lo --interface=v_{0} --dhcp-range={1},{2},4h".format(name, dhcp_range[0], dhcp_range[1]),
+                                        f"--conf-file=/dev/null --dhcp-leasefile=/tmp/leases.{name} --no-resolv "
+                                        f"--bind-interfaces --except-interface=lo --interface=v_{name} --dhcp-range={dhcp_range[0]},{dhcp_range[1]},4h",
                                         f"dhcp-{name}.log")
             self.addCleanup(self.machine.execute, "kill %i" % server)
             self.machine.execute("if firewall-cmd --state >/dev/null 2>&1; then firewall-cmd --add-service=dhcp; fi")
@@ -84,7 +84,7 @@ class NetworkCase(MachineCase, NetworkHelpers):
                 self.machine.execute(f"for d in {' '.join(new)}; do nmcli dev del $d; done")
 
             self.orig_devs = devs()
-            self.restore_dir("/etc/NetworkManager", post_restore_action="systemctl try-restart NetworkManager")
+            self.restore_dir("/etc/NetworkManager", restart_unit="NetworkManager")
             self.restore_dir("/etc/sysconfig/network-scripts")
             self.addCleanup(cleanupDevs)
 
@@ -191,14 +191,14 @@ class NetworkCase(MachineCase, NetworkHelpers):
         m.execute("systemctl restart NetworkManager")
 
     def slow_down_dhclient(self, delay):
-        self.machine.execute("""set -e
-        mkdir -p {0}
-        cp -a /usr/sbin/dhclient {0}/dhclient.real
-        printf '#!/bin/sh\\nsleep {1}\\nexec {0}/dhclient.real "$@"' > {0}/dhclient
-        chmod a+x {0}/dhclient
-        if selinuxenabled 2>&1; then chcon --reference /usr/sbin/dhclient {0}/dhclient; fi
-        mount -o bind {0}/dhclient /usr/sbin/dhclient
-        """.format(self.vm_tmpdir, delay))
+        self.machine.execute(f"""
+        mkdir -p {self.vm_tmpdir}
+        cp -a /usr/sbin/dhclient {self.vm_tmpdir}/dhclient.real
+        printf '#!/bin/sh\\nsleep {delay}\\nexec {self.vm_tmpdir}/dhclient.real "$@"' > {self.vm_tmpdir}/dhclient
+        chmod a+x {self.vm_tmpdir}/dhclient
+        if selinuxenabled 2>&1; then chcon --reference /usr/sbin/dhclient {self.vm_tmpdir}/dhclient; fi
+        mount -o bind {self.vm_tmpdir}/dhclient /usr/sbin/dhclient
+        """)
         self.addCleanup(self.machine.execute, "umount /usr/sbin/dhclient")
 
     def wait_onoff(self, sel, val):

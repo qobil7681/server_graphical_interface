@@ -16,9 +16,12 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import json
 import logging
-from typing import ClassVar, Dict, Generator, List, Optional, Sequence, Set, Tuple, Type
+from typing import BinaryIO, ClassVar, Dict, Generator, List, Optional, Sequence, Set, Tuple, Type
 
+from .jsonutil import JsonDocument, JsonError, JsonObject, create_object, get_bool, get_str
+from .protocol import CockpitProblem
 from .router import Endpoint, Router, RoutingRule
 
 logger = logging.getLogger(__name__)
@@ -41,7 +44,7 @@ class ChannelRoutingRule(RoutingRule):
         for entry in self.table.values():
             entry.sort(key=lambda cls: len(cls.restrictions), reverse=True)
 
-    def check_restrictions(self, restrictions: Sequence[Tuple[str, object]], options: Dict[str, object]) -> bool:
+    def check_restrictions(self, restrictions: Sequence[Tuple[str, object]], options: JsonObject) -> bool:
         for key, expected_value in restrictions:
             our_value = options.get(key)
 
@@ -58,7 +61,7 @@ class ChannelRoutingRule(RoutingRule):
         # Everything checked out
         return True
 
-    def apply_rule(self, options: Dict[str, object]) -> Optional['Channel']:
+    def apply_rule(self, options: JsonObject) -> Optional['Channel']:
         assert self.router is not None
 
         payload = options.get('payload')
@@ -75,10 +78,8 @@ class ChannelRoutingRule(RoutingRule):
         pass  # we don't hold any state
 
 
-class ChannelError(Exception):
-    def __init__(self, problem, **kwargs):
-        super().__init__(f'ChannelError {problem}')
-        self.kwargs = dict(kwargs, problem=problem)
+class ChannelError(CockpitProblem):
+    pass
 
 
 class Channel(Endpoint):
@@ -93,7 +94,7 @@ class Channel(Endpoint):
 
     # Task management
     _tasks: Set[asyncio.Task]
-    _close_args: Optional[Dict[str, object]] = None
+    _close_args: Optional[JsonObject] = None
 
     # Must be filled in by the channel implementation
     payload: ClassVar[str]
@@ -111,9 +112,9 @@ class Channel(Endpoint):
         if command == 'open':
             self._tasks = set()
             self.channel = message['channel']
-            if message.get('flow-control'):
+            if get_bool(message, 'flow-control', default=False):
                 self._send_pings = True
-            self.group = message.get('group', 'default')
+            self.group = get_str(message, 'group', 'default')
             self.freeze_endpoint()
             self.do_open(message)
         elif command == 'ready':
@@ -129,16 +130,19 @@ class Channel(Endpoint):
         elif command == 'options':
             self.do_options(message)
 
-    def do_channel_control(self, channel, command, message):
+    def do_channel_control(self, channel: str, command: str, message: JsonObject) -> None:
         # Already closing?  Ignore.
         if self._close_args is not None:
             return
 
         # Catch errors and turn them into close messages
         try:
-            self.do_control(command, message)
+            try:
+                self.do_control(command, message)
+            except JsonError as exc:
+                raise ChannelError('protocol-error', message=str(exc)) from exc
         except ChannelError as exc:
-            self.close(**exc.kwargs)
+            self.close(exc.attrs)
 
     def do_kill(self, host: Optional[str], group: Optional[str]) -> None:
         # Already closing?  Ignore.
@@ -152,27 +156,27 @@ class Channel(Endpoint):
         self.do_close()
 
     # At least this one really ought to be implemented...
-    def do_open(self, options):
+    def do_open(self, options: JsonObject) -> None:
         raise NotImplementedError
 
     # ... but many subclasses may reasonably want to ignore some of these.
-    def do_ready(self):
+    def do_ready(self) -> None:
         pass
 
-    def do_done(self):
+    def do_done(self) -> None:
         pass
 
-    def do_close(self):
+    def do_close(self) -> None:
         self.close()
 
-    def do_options(self, message):
+    def do_options(self, message: JsonObject) -> None:
         raise ChannelError('not-supported', message='This channel does not implement "options"')
 
     # 'reasonable' default, overridden in other channels for receive-side flow control
-    def do_ping(self, message):
+    def do_ping(self, message: JsonObject) -> None:
         self.send_pong(message)
 
-    def do_channel_data(self, channel, data):
+    def do_channel_data(self, channel: str, data: bytes) -> None:
         # Already closing?  Ignore.
         if self._close_args is not None:
             return
@@ -181,26 +185,26 @@ class Channel(Endpoint):
         try:
             self.do_data(data)
         except ChannelError as exc:
-            self.close(**exc.kwargs)
+            self.close(exc.attrs)
 
-    def do_data(self, _data):
+    def do_data(self, _data: bytes) -> None:
         # By default, channels can't receive data.
         self.close()
 
     # output
-    def ready(self, **kwargs):
+    def ready(self, **kwargs: JsonDocument) -> None:
         self.thaw_endpoint()
         self.send_control(command='ready', **kwargs)
 
-    def done(self):
+    def done(self) -> None:
         self.send_control(command='done')
 
     # tasks and close management
     def is_closing(self) -> bool:
         return self._close_args is not None
 
-    def _close_now(self):
-        self.send_control('close', **self._close_args)
+    def _close_now(self) -> None:
+        self.shutdown_endpoint(self._close_args)
 
     def _task_done(self, task):
         # Strictly speaking, we should read the result and check for exceptions but:
@@ -223,7 +227,7 @@ class Channel(Endpoint):
         task.add_done_callback(self._task_done)
         return task
 
-    def close(self, **kwargs):
+    def close(self, close_args: 'JsonObject | None' = None) -> None:
         """Requests the channel to be closed.
 
         After you call this method, you won't get anymore `.do_*()` calls.
@@ -234,7 +238,7 @@ class Channel(Endpoint):
         if self._close_args is not None:
             # close already requested
             return
-        self._close_args = kwargs
+        self._close_args = close_args or {}
         if not self._tasks:
             self._close_now()
 
@@ -270,16 +274,19 @@ class Channel(Endpoint):
 
     def do_resume_send(self) -> None:
         """Called to indicate that the channel may start sending again."""
-        pass  # change to `raise NotImplementedError` after everyone implements it
+        # change to `raise NotImplementedError` after everyone implements it
 
-    def send_message(self, **kwargs):
-        self.send_channel_message(self.channel, **kwargs)
+    json_encoder: ClassVar[json.JSONEncoder] = json.JSONEncoder(indent=2)
 
-    def send_control(self, command, **kwargs):
-        self.send_channel_control(self.channel, command=command, **kwargs)
+    def send_json(self, **kwargs: JsonDocument) -> bool:
+        pretty = self.json_encoder.encode(create_object(None, kwargs)) + '\n'
+        return self.send_data(pretty.encode())
 
-    def send_pong(self, message):
-        self.send_channel_control(**dict(message, command='pong'))
+    def send_control(self, command: str, **kwargs: JsonDocument) -> None:
+        self.send_channel_control(self.channel, command, None, **kwargs)
+
+    def send_pong(self, message: JsonObject) -> None:
+        self.send_channel_control(self.channel, 'pong', message)
 
 
 class ProtocolChannel(Channel, asyncio.Protocol):
@@ -298,15 +305,14 @@ class ProtocolChannel(Channel, asyncio.Protocol):
     _transport: Optional[asyncio.Transport]
     _loop: Optional[asyncio.AbstractEventLoop]
     _send_pongs: bool = True
-    _last_ping: Optional[Dict[str, object]]
+    _last_ping: Optional[JsonObject] = None
     _create_transport_task = None
 
     # read-side EOF handling
     _close_on_eof: bool = False
     _eof: bool = False
 
-    async def create_transport(self, loop: asyncio.AbstractEventLoop,
-                               options: Dict[str, object]) -> asyncio.Transport:
+    async def create_transport(self, loop: asyncio.AbstractEventLoop, options: JsonObject) -> asyncio.Transport:
         """Creates the transport for this channel, according to options.
 
         The event loop for the transport is passed to the function.  The
@@ -316,32 +322,32 @@ class ProtocolChannel(Channel, asyncio.Protocol):
         """
         raise NotImplementedError
 
-    def do_open(self, options):
+    def do_open(self, options: JsonObject) -> None:
         loop = asyncio.get_running_loop()
         self._create_transport_task = asyncio.create_task(self.create_transport(loop, options))
         self._create_transport_task.add_done_callback(self.create_transport_done)
 
-    def create_transport_done(self, task):
+    def create_transport_done(self, task: 'asyncio.Task[asyncio.Transport]') -> None:
         assert task is self._create_transport_task
         self._create_transport_task = None
         try:
             transport = task.result()
         except ChannelError as exc:
-            self.close(**exc.kwargs)
+            self.close(exc.attrs)
             return
 
         self.connection_made(transport)
         self.ready()
 
-    def connection_made(self, transport: asyncio.BaseTransport):
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
         assert isinstance(transport, asyncio.Transport)
         self._transport = transport
 
-    def _get_close_args(self) -> Dict[str, object]:
+    def _get_close_args(self) -> JsonObject:
         return {}
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
-        self.close(**self._get_close_args())
+        self.close(self._get_close_args())
 
     def do_data(self, data: bytes) -> None:
         assert self._transport is not None
@@ -413,8 +419,11 @@ class AsyncChannel(Channel):
     This subclass provides asynchronous `read()` and `write()` calls for
     subclasses, with familiar semantics.  `write()` doesn't buffer, so the
     `done()` method on the base channel class can be used in a way similar to
-    `shutdown()`.  The subclass must provide a async `run()` function, which
-    will be spawned as a task.
+    `shutdown()`.  A high-level `sendfile()` method is available to send the
+    entire contents of a binary-mode file-like object.
+
+    The subclass must provide an async `run()` function, which will be spawned
+    as a task.
 
     On the receiving side, the channel will respond to flow control pings to
     indicate that it has received the data, but only after it has been consumed
@@ -422,8 +431,6 @@ class AsyncChannel(Channel):
 
     On the sending side, write() will block if the channel backs up.
     """
-
-    loop = None
 
     # Receive-side flow control: intermix pings and data in the queue and reply
     # to pings as we dequeue them.  This is a buffer: since we need to handle
@@ -441,7 +448,7 @@ class AsyncChannel(Channel):
             await self.run(options)
             self.close()
         except ChannelError as exc:
-            self.close(**exc.kwargs)
+            self.close(exc.attrs)
 
     async def read(self):
         while True:
@@ -454,6 +461,17 @@ class AsyncChannel(Channel):
         if not self.send_data(data):
             self.write_waiter = asyncio.get_running_loop().create_future()
             await self.write_waiter
+
+    async def sendfile(self, stream: BinaryIO) -> None:
+        loop = asyncio.get_running_loop()
+        with stream:
+            while True:
+                data = await loop.run_in_executor(None, stream.read, Channel.BLOCK_SIZE)
+                if data == b'':
+                    break
+                await self.write(data)
+
+            self.done()
 
     def do_resume_send(self) -> None:
         if self.write_waiter is not None:
@@ -490,13 +508,13 @@ class GeneratorChannel(Channel):
     and sends the data which it yields.  If the generator returns a value it
     will be used for the close message.
     """
-    DataGenerator = Generator[bytes, None, Optional[Dict[str, object]]]
+    DataGenerator = Generator[bytes, None, Optional[JsonObject]]
     __generator: DataGenerator
 
-    def do_yield_data(self, options: Dict[str, object]) -> 'DataGenerator':
+    def do_yield_data(self, options: JsonObject) -> 'DataGenerator':
         raise NotImplementedError
 
-    def do_open(self, options: Dict[str, object]) -> None:
+    def do_open(self, options: JsonObject) -> None:
         self.__generator = self.do_yield_data(options)
         self.do_resume_send()
 
@@ -506,4 +524,4 @@ class GeneratorChannel(Channel):
                 pass
         except StopIteration as stop:
             self.done()
-            self.close(**stop.value or {})
+            self.close(stop.value)

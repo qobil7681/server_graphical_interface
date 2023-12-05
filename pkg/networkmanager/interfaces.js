@@ -585,6 +585,17 @@ export function NetworkManagerModel() {
             };
         }
 
+        if (settings.wireguard) {
+            result.wireguard = {
+                listen_port: get("wireguard", "listen-port", 0),
+                peers: get("wireguard", "peers", []).map(peer => ({
+                    publicKey: peer['public-key'].v,
+                    endpoint: peer.endpoint?.v, // enpoint of a peer is optional
+                    allowedIps: peer['allowed-ips']?.v
+                })),
+            };
+        }
+
         return result;
     }
 
@@ -698,6 +709,33 @@ export function NetworkManagerModel() {
             delete result["802-3-ethernet"]["cloned-mac-address"];
         } else
             delete result["802-3-ethernet"];
+
+        if (settings.wireguard) {
+            set("wireguard", "private-key", "s", settings.wireguard.private_key);
+            set("wireguard", "listen-port", "u", settings.wireguard.listen_port);
+            set("wireguard", "peers", "aa{sv}", settings.wireguard.peers.map(peer => {
+                return {
+                    "public-key": {
+                        t: "s",
+                        v: peer.publicKey
+                    },
+                    ...peer.endpoint
+                        ? {
+                            endpoint: {
+                                t: "s",
+                                v: peer.endpoint
+                            }
+                        }
+                        : {},
+                    "allowed-ips": {
+                        t: "as",
+                        v: peer.allowedIps
+                    }
+                };
+            }));
+        } else {
+            delete result.wireguard;
+        }
 
         return result;
     }
@@ -1300,7 +1338,8 @@ export function syn_click(model, fun) {
 }
 
 export function is_managed(dev) {
-    return dev.State != 10;
+    // Never let the user manage loopback devices, nothing good can come from that.
+    return dev.State != 10 && dev.DeviceType != "loopback" && dev.Interface != "lo";
 }
 
 function render_interface_link(iface) {
@@ -1632,7 +1671,7 @@ export function is_interface_connection(iface, connection) {
 }
 
 export function is_interesting_interface(iface) {
-    return !iface.Device || (is_managed(iface.Device) && iface.Device.DeviceType != "loopback");
+    return !iface.Device || is_managed(iface.Device);
 }
 
 export function member_connection_for_interface(group, iface) {

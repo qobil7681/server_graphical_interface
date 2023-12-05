@@ -53,9 +53,8 @@ import {
 import {
     bond_mode_choices,
 } from './bond.jsx';
-import {
-    ipv4_method_choices, ipv6_method_choices,
-} from './ip-settings.jsx';
+
+import { get_ip_method_choices } from './ip-settings.jsx';
 
 const _ = cockpit.gettext;
 
@@ -130,9 +129,9 @@ export const NetworkInterfacePage = ({
 
         function modify() {
             if (iface.MainConnection) {
-                return iface.MainConnection.activate(dev, null).fail(fail);
+                return iface.MainConnection.activate(dev, null).catch(fail);
             } else {
-                return dev.activate_with_settings(ghostSettings, null).fail(fail);
+                return dev.activate_with_settings(ghostSettings, null).catch(fail);
             }
         }
 
@@ -152,9 +151,7 @@ export const NetworkInterfacePage = ({
 
         function modify () {
             return dev.disconnect()
-                    .fail(function (error) {
-                        show_unexpected_error(error);
-                    });
+                    .catch(error => show_unexpected_error(error));
         }
 
         with_checkpoint(model, modify,
@@ -264,7 +261,7 @@ export const NetworkInterfacePage = ({
         return (
             <DescriptionListGroup>
                 <DescriptionListTerm>{_("Status")}</DescriptionListTerm>
-                <DescriptionListDescription>
+                <DescriptionListDescription className="networking-interface-status">
                     {activeConnection}
                     {state ? <span>{state}</span> : null}
                 </DescriptionListDescription>
@@ -273,17 +270,7 @@ export const NetworkInterfacePage = ({
     }
 
     function renderConnectionSettingsRows(con, settings) {
-        if (!isManaged) {
-            return ([
-                <DescriptionListGroup key="not-managed-device">
-                    <DescriptionListDescription>
-                        {_("This device cannot be managed here.")}
-                    </DescriptionListDescription>
-                </DescriptionListGroup>
-            ]);
-        }
-
-        if (!settings)
+        if (!isManaged || !settings)
             return [];
 
         let group_settings = null;
@@ -295,8 +282,7 @@ export const NetworkInterfacePage = ({
             const parts = [];
 
             if (params.method != "manual")
-                parts.push(choice_title((topic == "ipv4") ? ipv4_method_choices : ipv6_method_choices,
-                                        params.method, _("Unknown configuration")));
+                parts.push(choice_title(get_ip_method_choices(topic), params.method, _("Unknown configuration")));
 
             const addr_is_extra = (params.method != "manual");
             const addrs = [];
@@ -562,6 +548,19 @@ export const NetworkInterfacePage = ({
             return renderSettingsRow(_("VLAN"), rows, configure);
         }
 
+        function renderWireGuardSettingsRow() {
+            const rows = [];
+            const options = settings.wireguard;
+
+            if (!options) {
+                return null;
+            }
+
+            const configure = <NetworkAction type="wg" iface={iface} connectionSettings={settings} />;
+
+            return renderSettingsRow(_("WireGuard"), rows, configure);
+        }
+
         return [
             render_group(),
             renderAutoconnectRow(),
@@ -573,7 +572,8 @@ export const NetworkInterfacePage = ({
             renderBridgePortSettingsRow(),
             renderBondSettingsRow(),
             renderTeamSettingsRow(),
-            renderTeamPortSettingsRow()
+            renderTeamPortSettingsRow(),
+            renderWireGuardSettingsRow(),
         ];
     }
 
@@ -683,7 +683,8 @@ export const NetworkInterfacePage = ({
     const isDeletable = (iface && !dev) || (dev && (dev.DeviceType == 'bond' ||
                                                     dev.DeviceType == 'team' ||
                                                     dev.DeviceType == 'vlan' ||
-                                                    dev.DeviceType == 'bridge'));
+                                                    dev.DeviceType == 'bridge' ||
+                                                    dev.DeviceType == 'wireguard'));
 
     const settingsRows = renderConnectionSettingsRows(iface.MainConnection, connectionSettings)
             .map((component, idx) => <React.Fragment key={idx}>{component}</React.Fragment>);
@@ -725,7 +726,6 @@ export const NetworkInterfacePage = ({
                                 <span id="network-interface-hw">{renderDesc()}</span>
                                 <span id="network-interface-mac">{renderMac()}</span>
                             </CardTitle>
-
                         </CardHeader>
                         <CardBody>
                             <DescriptionList id="network-interface-settings" className="network-interface-settings pf-m-horizontal-on-sm">
@@ -734,6 +734,12 @@ export const NetworkInterfacePage = ({
                                 {settingsRows}
                             </DescriptionList>
                         </CardBody>
+                        { !isManaged
+                            ? <CardBody>
+                                {_("This device cannot be managed here.")}
+                            </CardBody>
+                            : null
+                        }
                     </Card>
                     {renderConnectionMembers(iface.MainConnection)}
                 </Gallery>

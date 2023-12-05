@@ -443,31 +443,19 @@ QUnit.test.skipWithPybridge("emit signal no meta", function (assert) {
     dbus.signal("/bork", "borkety.Bork", "Bork", [1, 2, 3, 4, "Bork"]);
 });
 
-function internal_test(assert, options) {
-    const done = assert.async();
-    assert.expect(2);
+async function internal_test(assert, options) {
     const dbus = cockpit.dbus(null, options);
-    dbus.call("/", "org.freedesktop.DBus.Introspectable", "Introspect")
-            .done(function(resp) {
-                assert.ok(String(resp[0]).indexOf("<node") !== -1, "introspected internal");
-            })
-            .always(function() {
-                assert.equal(this.state(), "resolved", "called internal");
-                done();
-            });
+    const resp = await dbus.call("/", "org.freedesktop.DBus.Introspectable", "Introspect");
+    assert.ok(String(resp[0]).indexOf("<node") !== -1, "introspected internal");
 }
 
-QUnit.test("internal dbus", function (assert) {
-    internal_test(assert, { bus: "internal" });
-});
+QUnit.test("internal dbus", async assert => internal_test(assert, { bus: "internal" }));
 
-QUnit.test.skipWithPybridge("internal dbus bus none", function (assert) {
-    internal_test(assert, { bus: "none" });
-});
+QUnit.test.skipWithPybridge("internal dbus bus none",
+                            async assert => internal_test(assert, { bus: "none" }));
 
-QUnit.test.skipWithPybridge("internal dbus bus none with address", function (assert) {
-    internal_test(assert, { bus: "none", address: "internal" });
-});
+QUnit.test.skipWithPybridge("internal dbus bus none with address",
+                            async assert => internal_test(assert, { bus: "none", address: "internal" }));
 
 QUnit.test.skipWithPybridge("separate dbus connections for channel groups", function (assert) {
     const done = assert.async();
@@ -536,6 +524,25 @@ Empty=
     assert.rejects(proxy.GetString("SomeSection", "UnknownKey"),
                    /key.*UnknownKey.*not exist/,
                    "unknown key raises an error");
+});
+
+QUnit.test("nonexisting address", async assert => {
+    const dbus = cockpit.dbus("org.freedesktop.DBus", { address: "unix:path=/nonexisting", bus: "none" });
+
+    try {
+        await dbus.call("/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", []);
+        assert.ok(false, "should not be reached");
+    } catch (ex) {
+        if (await QUnit.mock_info("pybridge")) {
+            assert.equal(ex.problem, "protocol-error", "got right close code");
+            assert.equal(ex.message, "failed to connect to none bus: [Errno 2] sd_bus_start: No such file or directory",
+                         "error message");
+        } else {
+            // C bridge has a weird error code
+            assert.equal(ex.problem, "internal-error", "got right close code");
+            assert.equal(ex.message, "Could not connect: No such file or directory", "error message");
+        }
+    }
 });
 
 QUnit.start();

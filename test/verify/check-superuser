@@ -56,10 +56,21 @@ class TestSuperuser(testlib.MachineCase):
         b.leave_page()
         b.check_superuser_indicator("Limited access")
 
+        # A reload should not lose privileges
+        b.become_superuser()
+        b.reload()
+        b.check_superuser_indicator("Administrative access")
+
+        # Drop privileges
+        b.drop_superuser()
+
         # We want to be lectured again
-        self.restore_file("/var/db/sudo/lectured/admin")
-        self.restore_file("/var/lib/sudo/lectured/admin")
+        self.restore_dir("/var/db/sudo/lectured")
+
         m.execute("rm -rf /var/{db,lib}/sudo/lectured/admin")
+        # Sudo since 1.9.15 uses a UID not a username https://www.sudo.ws/releases/stable/#1.9.15
+        uid = m.execute("id -u admin").strip()
+        m.execute(f"rm -rf /var/{{db,lib}}/sudo/lectured/{uid}")
 
         # Get the privileges back, this time in the mobile layout
         b.set_layout("mobile")
@@ -80,6 +91,35 @@ class TestSuperuser(testlib.MachineCase):
         b.relogin()
         b.leave_page()
         b.check_superuser_indicator("Administrative access")
+
+        # Test that closing instead of cancelling the dialog keeps the "switch
+        # to administrative button"
+        b.open_superuser_dialog()
+        b.click(".pf-v5-c-modal-box:contains('Switch to limited access') button:contains('Limit access')")
+        b.wait_not_present(".pf-v5-c-modal-box:contains('Switch to limited access')")
+        b.check_superuser_indicator("Limited access")
+
+        b.open_superuser_dialog()
+        b.click(".pf-v5-c-modal-box__close button")
+        b.check_superuser_indicator("Limited access")
+
+    def testSudoIOLogging(self):
+        b = self.browser
+        m = self.machine
+
+        self.write_file("/etc/sudoers.d/log", "Defaults log_output\n")
+
+        # with explicitly becoming superuser
+        self.login_and_go(superuser=False)
+        b.check_superuser_indicator("Limited access")
+        b.become_superuser()
+        self.assertIn("00\n", m.execute("ls /var/log/sudo-io"))
+        b.logout()
+
+        # with immediate superuser at login
+        b.login_and_go()
+        b.check_superuser_indicator("Administrative access")
+        b.logout()
 
     def testNoPasswd(self):
         b = self.browser
@@ -411,7 +451,6 @@ class TestSuperuserOldWebserver(testlib.MachineCase):
         "machine2": {"address": "10.111.113.2/20", "memory_mb": 512},
     }
 
-    @testlib.todoPybridge(reason="https://github.com/cockpit-project/cockpit/issues/18712")
     def test(self):
         b = self.browser
         m = self.machine
@@ -438,13 +477,33 @@ class TestSuperuserOldWebserver(testlib.MachineCase):
         b.click('#login-button')
         b.wait_visible('#content')
 
-        # We should have gotten the password from the old cockpit-ws and it should work
-        b.check_superuser_indicator("Administrative access")
-        b.go("/playground/test")
-        b.enter_page("/playground/test")
-        b.click(".super-channel button")
-        b.wait_in_text(".super-channel span", 'result: ')
-        self.assertIn('result: uid=0', b.text(".super-channel span"))
+        if not self.is_pybridge():
+            # The C bridge will recognize that it is being started by
+            # a old webserver (or old bridge) and will start "any"
+            # privileged bridge during startup.
+            b.check_superuser_indicator("Administrative access")
+            b.go("/playground/test")
+            b.enter_page("/playground/test")
+            b.click(".super-channel button")
+            b.wait_in_text(".super-channel span", 'result: ')
+            self.assertIn('result: uid=0', b.text(".super-channel span"))
+
+        else:
+            # The Python bridge will not start any privileged bridge
+            # if not explicitly told, and a old webserver (or old
+            # bridge) does not tell it anything.
+            b.check_superuser_indicator("Limited access")
+            b.go("/playground/test")
+            b.enter_page("/playground/test")
+            b.click(".super-channel button")
+            b.wait_in_text(".super-channel span", 'access-denied')
+
+            b.become_superuser()
+            b.go("/playground/test")
+            b.enter_page("/playground/test")
+            b.click(".super-channel button")
+            b.wait_in_text(".super-channel span", 'result: ')
+            self.assertIn('result: uid=0', b.text(".super-channel span"))
 
     def testNotAuth(self):
         b = self.browser
@@ -515,7 +574,7 @@ class TestSuperuserDashboard(testlib.MachineCase):
         b.wait_visible('#hosts_setup_server_dialog button:contains("Add")')
         b.click('#hosts_setup_server_dialog button:contains("Add")')
         b.wait_in_text('#hosts_setup_server_dialog', "You are connecting to 10.111.113.2 for the first time.")
-        b.click('#hosts_setup_server_dialog button:contains("Accept key and connect")')
+        b.click('#hosts_setup_server_dialog button.pf-m-primary')
         b.wait_in_text('#hosts_setup_server_dialog', "Unable to log in")
         b.set_input_text("#login-custom-password", "foobar")
         b.click('#hosts_setup_server_dialog button:contains("Log in")')
@@ -534,6 +593,22 @@ class TestSuperuserDashboard(testlib.MachineCase):
         b.check_superuser_indicator("Limited access")
         b.become_superuser()
         b.go("/@10.111.113.2/playground/test")
+        b.enter_page("/playground/test", host="10.111.113.2")
+        b.click(".super-channel button")
+        b.wait_in_text(".super-channel span", 'result: ')
+        self.assertIn('result: uid=0', b.text(".super-channel span"))
+
+        # Logging out and logging back in should give us immediate
+        # superuser on m2 (once we have logged in there).
+        b.relogin()
+        b.wait_visible("#machine-troubleshoot")
+        b.click('#machine-troubleshoot')
+        b.wait_visible('#hosts_setup_server_dialog')
+        b.set_input_text("#login-custom-password", "foobar")
+        b.click('#hosts_setup_server_dialog button:contains("Log in")')
+        b.wait_not_present('#hosts_setup_server_dialog')
+        b.check_superuser_indicator("Administrative access")
+
         b.enter_page("/playground/test", host="10.111.113.2")
         b.click(".super-channel button")
         b.wait_in_text(".super-channel span", 'result: ')
@@ -565,7 +640,6 @@ class TestSuperuserOldDashboard(testlib.MachineCase):
         "machine2": {"address": "10.111.113.2/20", "memory_mb": 512},
     }
 
-    @testlib.todoPybridge(reason="https://github.com/cockpit-project/cockpit/issues/18712")
     def test(self):
         b = self.browser
         m = self.machines["machine1"]
@@ -597,29 +671,50 @@ class TestSuperuserOldDashboard(testlib.MachineCase):
 
         # There should be a superuser button in the Overview of machine2
 
-        b.enter_page("/system", host="10.111.113.2")
-        b.click(".ct-overview-header-actions button:contains('Administrative access')")
-        b.click(".pf-v5-c-modal-box:contains('Switch to limited access') button:contains('Limit access')")
-        b.wait_not_present(".pf-v5-c-modal-box:contains('Switch to limited access')")
-        b.wait_visible(".ct-overview-header-actions button:contains('Limited access')")
-        b.go("/@10.111.113.2/playground/test")
-        b.enter_page("/playground/test", host="10.111.113.2")
-        b.click(".super-channel button")
-        b.wait_in_text(".super-channel span", 'access-denied')
+        def get_admin():
+            b.go("/@10.111.113.2")
+            b.enter_page("/system", host="10.111.113.2")
+            b.click(".ct-overview-header-actions button:contains('Limited access')")
+            b.wait_in_text(".pf-v5-c-modal-box:contains('Switch to administrative access')", "Password for admin:")
+            b.set_input_text(".pf-v5-c-modal-box:contains('Switch to administrative access') input", "foobar")
+            b.click(".pf-v5-c-modal-box button:contains('Authenticate')")
+            b.wait_not_present(".pf-v5-c-modal-box:contains('Switch to administrative access')")
+            b.wait_visible(".ct-overview-header-actions button:contains('Administrative access')")
+            b.go("/@10.111.113.2/playground/test")
+            b.enter_page("/playground/test", host="10.111.113.2")
+            b.click(".super-channel button")
+            b.wait_in_text(".super-channel span", 'result: ')
+            self.assertIn('result: uid=0', b.text(".super-channel span"))
 
-        b.go("/@10.111.113.2")
-        b.enter_page("/system", host="10.111.113.2")
-        b.click(".ct-overview-header-actions button:contains('Limited access')")
-        b.wait_in_text(".pf-v5-c-modal-box:contains('Switch to administrative access')", "Password for admin:")
-        b.set_input_text(".pf-v5-c-modal-box:contains('Switch to administrative access') input", "foobar")
-        b.click(".pf-v5-c-modal-box button:contains('Authenticate')")
-        b.wait_not_present(".pf-v5-c-modal-box:contains('Switch to administrative access')")
-        b.wait_visible(".ct-overview-header-actions button:contains('Administrative access')")
-        b.go("/@10.111.113.2/playground/test")
-        b.enter_page("/playground/test", host="10.111.113.2")
-        b.click(".super-channel button")
-        b.wait_in_text(".super-channel span", 'result: ')
-        self.assertIn('result: uid=0', b.text(".super-channel span"))
+        def drop_admin():
+            b.go("/@10.111.113.2")
+            b.enter_page("/system", host="10.111.113.2")
+            b.click(".ct-overview-header-actions button:contains('Administrative access')")
+            b.click(".pf-v5-c-modal-box:contains('Switch to limited access') button:contains('Limit access')")
+            b.wait_not_present(".pf-v5-c-modal-box:contains('Switch to limited access')")
+            b.wait_visible(".ct-overview-header-actions button:contains('Limited access')")
+            b.go("/@10.111.113.2/playground/test")
+            b.enter_page("/playground/test", host="10.111.113.2")
+            b.click(".super-channel button")
+            b.wait_in_text(".super-channel span", 'access-denied')
+
+        if not self.is_pybridge():
+            # The C bridge will recognize that it is being started by
+            # a old bridge (or old webserver) and will start "any"
+            # privileged bridge during startup.  So we have admin at
+            # this point.
+            #
+            drop_admin()
+            get_admin()
+
+        else:
+            # The Python bridge will not start any privileged bridge
+            # if not explicitly told, and a old bridge (or old
+            # webserver) does not tell it anything.  So we don't have
+            # admin at this point.
+            #
+            get_admin()
+            drop_admin()
 
 
 @testlib.skipDistroPackage()
@@ -629,7 +724,7 @@ class TestSuperuserDashboardOldMachine(testlib.MachineCase):
         "machine2": {"address": "10.111.113.2/20", "image": "centos-7"},
     }
 
-    @testlib.todoPybridge(reason="https://github.com/cockpit-project/cockpit/issues/18712")
+    @testlib.todoPybridgeRHEL8()
     def test(self):
         b = self.browser
 
@@ -641,7 +736,7 @@ class TestSuperuserDashboardOldMachine(testlib.MachineCase):
         b.wait_visible('#hosts_setup_server_dialog')
         b.click('#hosts_setup_server_dialog button:contains("Add")')
         b.wait_in_text('#hosts_setup_server_dialog', "You are connecting to 10.111.113.2 for the first time.")
-        b.click('#hosts_setup_server_dialog button:contains("Accept key and connect")')
+        b.click('#hosts_setup_server_dialog button.pf-m-primary')
         b.wait_in_text('#hosts_setup_server_dialog', "Unable to log in")
         b.set_input_text("#login-custom-password", "foobar")
         b.click('#hosts_setup_server_dialog button:contains("Log in")')

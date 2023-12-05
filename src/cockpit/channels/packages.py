@@ -16,61 +16,86 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+from typing import Optional
 
-from .. import data
-from ..channel import Channel
+from ..channel import AsyncChannel
+from ..data import read_cockpit_data_file
+from ..jsonutil import JsonObject, get_dict, get_str
+from ..packages import Packages
 
 logger = logging.getLogger(__name__)
 
 
-class PackagesChannel(Channel):
+class PackagesChannel(AsyncChannel):
     payload = 'http-stream1'
     restrictions = [("internal", "packages")]
 
-    headers = None
-    protocol = None
-    host = None
-    origin = None
-    out_headers = None
-    options = None
-    post = None
+    # used to carry data forward from open to done
+    options: Optional[JsonObject] = None
 
-    def push_header(self, key, value):
-        if self.out_headers is None:
-            self.out_headers = {}
-        self.out_headers[key] = value
-
-    def http_ok(self, content_type, extra_headers=None):
-        headers = {'Content-Type': content_type}
-        if self.out_headers is not None:
-            headers.update(self.out_headers)
-        if extra_headers is not None:
-            headers.update(extra_headers)
-        self.send_message(status=200, reason='OK', headers={k: v for k, v in headers.items() if v is not None})
-
-    def http_error(self, status, message):
-        template = data.read_cockpit_data_file('fail.html')
-        self.send_message(status=status, reason='ERROR', headers={'Content-Type': 'text/html; charset=utf-8'})
+    def http_error(self, status: int, message: str) -> None:
+        template = read_cockpit_data_file('fail.html')
+        self.send_json(status=status, reason='ERROR', headers={'Content-Type': 'text/html; charset=utf-8'})
         self.send_data(template.replace(b'@@message@@', message.encode('utf-8')))
-
-    def do_done(self):
-        assert not self.post
-        assert self.options['method'] == 'GET'
-        path = self.options['path']
-
-        self.headers = self.options['headers']
-        self.protocol = self.headers['X-Forwarded-Proto']
-        self.host = self.headers['X-Forwarded-Host']
-        self.origin = f'{self.protocol}://{self.host}'
-
-        self.router.packages.serve_file(path, self)
         self.done()
         self.close()
 
-    def do_data(self, data):
-        self.post += data
+    async def run(self, options: JsonObject) -> None:
+        packages: Packages = self.router.packages  # type: ignore[attr-defined]  # yes, this is evil
 
-    def do_open(self, options):
-        self.post = b''
-        self.options = options
-        self.ready()
+        try:
+            if get_str(options, 'method') != 'GET':
+                raise ValueError(f'Unsupported HTTP method {options["method"]}')
+
+            self.ready()
+            if await self.read() != b'':
+                raise ValueError('Received unexpected data')
+
+            path = get_str(options, 'path')
+            headers = get_dict(options, 'headers')
+            document = packages.load_path(path, headers)
+
+            # Note: we can't cache documents right now.  See
+            # https://github.com/cockpit-project/cockpit/issues/19071
+            # for future plans.
+            out_headers: JsonObject = {
+                'Cache-Control': 'no-cache, no-store',
+                'Content-Type': document.content_type,
+            }
+
+            if document.content_encoding is not None:
+                out_headers['Content-Encoding'] = document.content_encoding
+
+            if document.content_security_policy is not None:
+                policy = document.content_security_policy
+
+                # https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/connect-src
+                #
+                #    Note: connect-src 'self' does not resolve to websocket
+                #    schemes in all browsers, more info in this issue.
+                #
+                # https://github.com/w3c/webappsec-csp/issues/7
+                if "connect-src 'self';" in policy:
+                    protocol = headers.get('X-Forwarded-Proto')
+                    host = headers.get('X-Forwarded-Host')
+                    if not isinstance(protocol, str) or not isinstance(host, str):
+                        raise ValueError('Invalid host or protocol header')
+
+                    websocket_scheme = "wss" if protocol == "https" else "ws"
+                    websocket_origin = f"{websocket_scheme}://{host}"
+                    policy = policy.replace("connect-src 'self';", f"connect-src {websocket_origin} 'self';")
+
+                out_headers['Content-Security-Policy'] = policy
+
+        except ValueError as exc:
+            self.http_error(400, str(exc))
+
+        except KeyError:
+            self.http_error(404, 'Not found')
+
+        except OSError as exc:
+            self.http_error(500, f'Internal error: {exc!s}')
+
+        else:
+            self.send_json(status=200, reason='OK', headers=out_headers)
+            await self.sendfile(document.data)

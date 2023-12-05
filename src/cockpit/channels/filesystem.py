@@ -18,12 +18,12 @@
 import logging
 import os
 import random
-from typing import Dict
 
 from cockpit._vendor.systemd_ctypes import PathWatch
 from cockpit._vendor.systemd_ctypes.inotify import Event as InotifyEvent
 
 from ..channel import Channel, ChannelError, GeneratorChannel
+from ..jsonutil import JsonObject, get_int, get_str
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class FsListChannel(Channel):
         else:
             mode = 'special'
 
-        self.send_message(event=event, path=entry.name, type=mode)
+        self.send_json(event=event, path=entry.name, type=mode)
 
     def do_open(self, options):
         path = options.get('path')
@@ -80,6 +80,8 @@ class FsListChannel(Channel):
             else:
                 problem = 'internal-error'
             raise ChannelError(problem, message=str(error)) from error
+
+        self.ready()
         for entry in scan_dir:
             self.send_entry("present", entry)
 
@@ -91,22 +93,20 @@ class FsListChannel(Channel):
 class FsReadChannel(GeneratorChannel):
     payload = 'fsread1'
 
-    def do_yield_data(self, options: Dict[str, object]) -> GeneratorChannel.DataGenerator:
-        binary = options.get('binary', False)
-        max_read_size = options.get('max_read_size')
-        # TODO: generic JSON validation
-        if max_read_size is not None and not isinstance(max_read_size, int):
-            raise ChannelError('protocol-error', message='max_read_size must be an integer')
-        if not isinstance(options['path'], str):
-            raise ChannelError('protocol-error', message='path is not a string')
+    def do_yield_data(self, options: JsonObject) -> GeneratorChannel.DataGenerator:
+        path = get_str(options, 'path')
+        binary = get_str(options, 'binary', None)
+        max_read_size = get_int(options, 'max_read_size', None)
 
-        logger.debug('Opening file "%s" for reading', options['path'])
+        logger.debug('Opening file "%s" for reading', path)
 
         try:
-            with open(options['path'], 'rb') as filep:
+            with open(path, 'rb') as filep:
                 buf = os.stat(filep.fileno())
                 if max_read_size is not None and buf.st_size > max_read_size:
                     raise ChannelError('too-large')
+
+                self.ready()
 
                 while True:
                     data = filep.read1(Channel.BLOCK_SIZE)
@@ -198,7 +198,7 @@ class FsReplaceChannel(Channel):
             self._tempfile = None
 
         self.done()
-        self.close(tag=tag_from_path(self._path))
+        self.close({'tag': tag_from_path(self._path)})
 
     def do_close(self):
         if self._tempfile is not None:
@@ -239,20 +239,20 @@ class FsWatchChannel(Channel):
             # file inside watched directory changed
             path = os.path.join(self._path, name.decode())
             tag = tag_from_path(path)
-            self.send_message(event=event, path=path, tag=tag, type=type_)
+            self.send_json(event=event, path=path, tag=tag, type=type_)
         else:
             # the watched path itself changed; filter out duplicate events
             tag = tag_from_path(self._path)
             if tag == self._tag:
                 return
             self._tag = tag
-            self.send_message(event=event, path=self._path, tag=self._tag, type=type_)
+            self.send_json(event=event, path=self._path, tag=self._tag, type=type_)
 
     def do_identity_changed(self, fd, err):
         logger.debug("do_identity_changed(%s): fd %s, err %s", self._path, str(fd), err)
         self._tag = tag_from_fd(fd) if fd else '-'
         if self._active:
-            self.send_message(event='created' if fd else 'deleted', path=self._path, tag=self._tag)
+            self.send_json(event='created' if fd else 'deleted', path=self._path, tag=self._tag)
 
     def do_open(self, options):
         self._path = options['path']

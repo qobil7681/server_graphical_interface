@@ -184,10 +184,10 @@ account    required     pam_succeed_if.so user ingroup %s""" % m.get_admin_group
 
             # login with user shell that prints some stdout/err noise
             # having stdout output in ~/.bashrc confuses docker, so don't run on OSTree
-            m.execute("set -e; cd ~admin; cp -a .bashrc .bashrc.bak; [ ! -e .profile ] || cp -a .profile .profile.bak; "
+            m.execute("cd ~admin; cp -a .bashrc .bashrc.bak; [ ! -e .profile ] || cp -a .profile .profile.bak; "
                       "echo 'echo noise-rc-out; echo noise-rc-err >&2' >> .bashrc; "
                       "echo 'echo noise-profile-out; echo noise-profile-err >&2' >> .profile")
-            self.addCleanup(m.execute, "set -e; cd ~admin; mv .bashrc.bak .bashrc; "
+            self.addCleanup(m.execute, "cd ~admin; mv .bashrc.bak .bashrc; "
                                        "if [ -e .profile.bak ]; then mv .profile.bak .profile; else rm .profile; fi")
             b.login_and_go()
 
@@ -262,7 +262,7 @@ account    required     pam_succeed_if.so user ingroup %s""" % m.get_admin_group
 
         # On OSTree this happens over ssh
         if m.ostree_image:
-            self.restore_dir("/etc/ssh", '( ! systemctl is-active sshd.socket || systemctl stop sshd.socket) && systemctl restart sshd.service')
+            self.restore_dir("/etc/ssh", restart_unit="sshd")
             m.execute("sed -i 's/.*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*")
             m.execute("( ! systemctl is-active sshd.socket || systemctl stop sshd.socket) && systemctl restart sshd.service")
 
@@ -361,7 +361,7 @@ account    required     pam_succeed_if.so user ingroup %s""" % m.get_admin_group
         conf = "/etc/pam.d/cockpit"
         if m.ostree_image:
             conf = "/etc/pam.d/sshd"
-            self.restore_dir("/etc/ssh", '( ! systemctl is-active sshd.socket || systemctl stop sshd.socket) && systemctl restart sshd.service')
+            self.restore_dir("/etc/ssh", restart_unit="sshd")
             m.execute("sed -i 's/.*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*")
             m.execute("( ! systemctl is-active sshd.socket || systemctl stop sshd.socket) && systemctl restart sshd.service")
 
@@ -560,7 +560,7 @@ account    required     pam_succeed_if.so user ingroup %s""" % m.get_admin_group
         """)
         b.open("/system")
         b.wait_visible("#unsupported-browser")
-        b.wait_in_text("#show-other-login-options-text", "Bypass browser check")
+        b.wait_in_text("#bypass-browser-check", "Bypass browser check")
         b.click(".pf-v5-c-expandable-section")
 
         b.set_val('#login-user-input', "admin")
@@ -762,7 +762,7 @@ account    required     pam_succeed_if.so user ingroup %s""" % m.get_admin_group
             # also, sssd is split into several services
             self.restore_dir("/etc/sssd", post_restore_action="systemctl stop 'sssd*'")
         else:
-            self.restore_dir("/etc/sssd", post_restore_action="systemctl try-restart sssd")
+            self.restore_dir("/etc/sssd", restart_unit="sssd")
 
         m.execute("useradd alice; echo alice:foobar123 | chpasswd")
         m.upload(["alice.pem", "alice.key", "alice-expired.pem", "bob.pem", "bob.key"], self.vm_tmpdir,
@@ -841,7 +841,10 @@ matchrule = <SUBJECT>^DC=LAN,DC=COCKPIT,CN=alice$
                     if "State: active" in out:  # skip closing sessions
                         self.assertIn(session_leader, out)
                         self.assertIn('cockpit-bridge', out)
-                        self.assertIn('cockpit; type web', out)
+                        # systemd < 255: "Service: cockpit; type web; class user"
+                        # systemd ≥ 255: "Service: cockpit\n   Type: web\n Class: user"
+                        self.assertRegex(out, r"Service:\s+cockpit")
+                        self.assertRegex(out, "[tT]ype.*web")
                         break
                 else:
                     self.fail("no active session for active user")

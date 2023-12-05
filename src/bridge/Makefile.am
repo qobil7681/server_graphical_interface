@@ -12,6 +12,7 @@ libcockpit_metrics_a_CPPFLAGS = \
 libcockpit_metrics_a_LIBS = \
 	libcockpit-metrics.a \
 	$(libcockpit_common_a_LIBS) \
+	$(fts_LIBS) \
 	-lm \
 	$(NULL)
 
@@ -38,7 +39,7 @@ libcockpit_metrics_a_SOURCES = \
 	src/bridge/cockpitsamples.h \
 	$(NULL)
 
-if !WITH_PYBRIDGE
+if WITH_OLD_BRIDGE
 
 # -----------------------------------------------------------------------------
 # libcockpit-bridge.a: code used in cockpit-bridge and its tests

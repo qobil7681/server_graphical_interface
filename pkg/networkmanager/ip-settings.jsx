@@ -26,8 +26,9 @@ import { FormSelect, FormSelectOption } from "@patternfly/react-core/dist/esm/co
 import { Grid } from "@patternfly/react-core/dist/esm/layouts/Grid/index.js";
 import { Switch } from "@patternfly/react-core/dist/esm/components/Switch/index.js";
 import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput/index.js";
+import { Tooltip } from "@patternfly/react-core/dist/esm/components/Tooltip/index.js";
 
-import { MinusIcon, PlusIcon } from '@patternfly/react-icons';
+import { PlusIcon, TrashIcon } from '@patternfly/react-icons';
 
 import { NetworkModal, dialogSave } from './dialogs-common.jsx';
 import { ModelContext } from './model-context.jsx';
@@ -35,25 +36,35 @@ import { useDialogs } from "dialogs.jsx";
 
 const _ = cockpit.gettext;
 
-export const ipv4_method_choices =
-    [
-        { choice: 'auto', title: _("Automatic (DHCP)") },
-        { choice: 'link-local', title: _("Link local") },
-        { choice: 'manual', title: _("Manual") },
-        { choice: 'shared', title: _("Shared") },
-        { choice: 'disabled', title: _("Disabled") }
-    ];
+const ip_method_choices = [
+    { choice: 'auto', title: _("Automatic") },
+    { choice: 'dhcp', title: _("Automatic (DHCP only)") },
+    { choice: 'link-local', title: _("Link local") },
+    { choice: 'manual', title: _("Manual") },
+    { choice: 'ignore', title: _("Ignore") },
+    { choice: 'shared', title: _("Shared") },
+    { choice: 'disabled', title: _("Disabled") }
+];
 
-export const ipv6_method_choices =
-    [
-        { choice: 'auto', title: _("Automatic") },
-        { choice: 'dhcp', title: _("Automatic (DHCP only)") },
-        { choice: 'link-local', title: _("Link local") },
-        { choice: 'manual', title: _("Manual") },
-        { choice: 'ignore', title: _("Ignore") },
-        { choice: 'shared', title: _("Shared") },
-        { choice: 'disabled', title: _("Disabled") }
-    ];
+const supported_ipv4_methods = ['auto', 'link-local', 'manual', 'shared', 'disabled'];
+// NM only supports a subset of IPv4 and IPv6 methods for wireguard
+// See: https://gitlab.freedesktop.org/NetworkManager/NetworkManager/-/blob/1.42.8/src/libnm-core-impl/nm-setting-wireguard.c#L1723
+const wg_supported_ipv4_methods = ['manual', 'disabled'];
+const wg_supported_ipv6_methods = ['link-local', 'manual', 'ignored', 'disabled'];
+
+export function get_ip_method_choices(topic, device_type) {
+    if (topic === 'ipv4') {
+        if (device_type === 'wireguard')
+            return ip_method_choices.filter(item => wg_supported_ipv4_methods.includes(item.choice));
+        return ip_method_choices.filter(item => supported_ipv4_methods.includes(item.choice));
+    }
+
+    if (device_type === 'wireguard')
+        return ip_method_choices.filter(item => wg_supported_ipv6_methods.includes(item.choice));
+
+    // IPv6 supports all the choices
+    return ip_method_choices;
+}
 
 export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
     const Dialogs = useDialogs();
@@ -128,7 +139,7 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
         return false;
     };
     const addressIpv4Helper = (address) => {
-        const config = { address, netmask: null, gateway: null };
+        const config = { address, netmask: '', gateway: '' };
         const split = address.split('.');
 
         if (split.length !== 4)
@@ -141,7 +152,7 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
             return { ...config, netmask: "255.255.0.0" };
         } else if (split[0] <= 192 && split[0] <= 223) {
             return { ...config, netmask: "255.255.255.0" };
-        } else return { ...config, gateway: null };
+        } else return { ...config, gateway: '' };
     };
 
     return (
@@ -163,14 +174,17 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
                                             aria-label={_("Select method")}
                                             onChange={(_, val) => setMethod(val)}
                                             value={method}>
-                                    {(topic == "ipv4" ? ipv4_method_choices : ipv6_method_choices).map(choice => <FormSelectOption value={choice.choice} label={choice.title} key={choice.choice} />)}
+                                    {get_ip_method_choices(topic, dev.DeviceType).map(choice => <FormSelectOption value={choice.choice} label={choice.title} key={choice.choice} />)}
                                 </FormSelect>
-                                <Button variant="secondary"
+                                <Tooltip content={_("Add address")}>
+                                    <Button variant="secondary"
                                         isDisabled={!canHaveExtra}
                                         onClick={() => setAddresses([...addresses, { address: "", netmask: "", gateway: "" }])}
                                         id={idPrefix + "-address-add"}
-                                        aria-label={_("Add item")}
-                                        icon={<PlusIcon />} />
+                                        aria-label={_("Add address")}>
+                                        <PlusIcon />
+                                    </Button>
+                                </Tooltip>
                             </Flex>
                         }
                     />
@@ -206,11 +220,11 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
                                     ))} />
                             </FormGroup>
                             <FormGroup className="pf-m-1-col-on-sm remove-button-group">
-                                <Button variant='secondary'
+                                <Button variant='plain'
                                         isDisabled={method == 'manual' && i == 0}
                                         onClick={() => setAddresses(addresses.filter((_, index) => index !== i))}
                                         aria-label={_("Remove item")}
-                                        icon={<MinusIcon />} />
+                                        icon={<TrashIcon />} />
                             </FormGroup>
                         </Grid>
                     );
@@ -228,12 +242,15 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
                                     isDisabled={!canAuto}
                                     onChange={(_event, value) => setIgnoreAutoDns(!value)}
                                     label={_("Automatic")} />
-                                <Button variant="secondary"
+                                <Tooltip content={_("Add DNS server")}>
+                                    <Button variant="secondary"
                                         isDisabled={!canHaveExtra}
                                         onClick={() => setDns([...dns, ""])}
                                         id={idPrefix + "-dns-add"}
-                                        aria-label={_("Add item")}
-                                        icon={<PlusIcon />} />
+                                        aria-label={_("Add DNS server")}>
+                                        <PlusIcon />
+                                    </Button>
+                                </Tooltip>
                             </Flex>
                         }
                     />
@@ -251,11 +268,11 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
                                     ))} />
                             </FormGroup>
                             <FormGroup className="pf-m-1-col-on-sm remove-button-group">
-                                <Button variant='secondary'
+                                <Button variant='plain'
                                         size="sm"
                                         onClick={() => setDns(dns.filter((_, index) => index !== i))}
                                         aria-label={_("Remove item")}
-                                        icon={<MinusIcon />} />
+                                        icon={<TrashIcon />} />
                             </FormGroup>
                         </Grid>
                     );
@@ -273,12 +290,15 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
                                     isDisabled={!canAuto}
                                     onChange={(_event, value) => setIgnoreAutoDns(!value)}
                                     label={_("Automatic")} />
-                                <Button variant="secondary"
+                                <Tooltip content={_("Add search domain")}>
+                                    <Button variant="secondary"
                                         isDisabled={!canHaveExtra}
                                         onClick={() => setDnsSearch([...dnsSearch, ""])}
                                         id={idPrefix + "-dns-search-add"}
-                                        aria-label={_("Add item")}
-                                        icon={<PlusIcon />} />
+                                        aria-label={_("Add search domain")}>
+                                        <PlusIcon />
+                                    </Button>
+                                </Tooltip>
                             </Flex>
                         }
                     />
@@ -296,11 +316,11 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
                                     ))} />
                             </FormGroup>
                             <FormGroup className="pf-m-1-col-on-sm remove-button-group">
-                                <Button variant='secondary'
+                                <Button variant='plain'
                                         size="sm"
                                         onClick={() => setDnsSearch(dnsSearch.filter((_, index) => index !== i))}
                                         aria-label={_("Remove item")}
-                                        icon={<MinusIcon />} />
+                                        icon={<TrashIcon />} />
                             </FormGroup>
                         </Grid>
                     );
@@ -318,12 +338,15 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
                                     isDisabled={!canAuto}
                                     onChange={(_event, value) => setIgnoreAutoRoutes(!value)}
                                     label={_("Automatic")} />
-                                <Button variant="secondary"
+                                <Tooltip content={_("Add route")}>
+                                    <Button variant="secondary"
                                         isDisabled={isOff}
                                         onClick={() => setRoutes([...routes, { address: "", netmask: "", gateway: "", metric: "" }])}
                                         id={idPrefix + "-route-add"}
-                                        aria-label={_("Add item")}
-                                        icon={<PlusIcon />} />
+                                        aria-label={_("Add route")}>
+                                        <PlusIcon />
+                                    </Button>
+                                </Tooltip>
                             </Flex>
                         }
                     />
@@ -365,11 +388,11 @@ export const IpSettingsDialog = ({ topic, connection, dev, settings }) => {
                                     ))} />
                             </FormGroup>
                             <FormGroup className="pf-m-1-col-on-sm remove-button-group">
-                                <Button variant='secondary'
+                                <Button variant='plain'
                                         size="sm"
                                         onClick={() => setRoutes(routes.filter((_, index) => index !== i))}
                                         aria-label={_("Remove item")}
-                                        icon={<MinusIcon />} />
+                                        icon={<TrashIcon />} />
                             </FormGroup>
                         </Grid>
                     );

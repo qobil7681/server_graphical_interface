@@ -51,7 +51,7 @@ const UnlockDialog = ({ proxy, host }) => {
     const [methods, setMethods] = useState(null);
     const [method, setMethod] = useState(false);
     const [busy, setBusy] = useState(false);
-    const [cancel, setCancel] = useState(null);
+    const [cancel, setCancel] = useState(() => D.close);
     const [prompt, setPrompt] = useState(null);
     const [message, setMessage] = useState(null);
     const [error, setError] = useState(null);
@@ -115,7 +115,7 @@ const UnlockDialog = ({ proxy, host }) => {
     }
 
     function init() {
-        return proxy.Stop().always(() => {
+        return proxy.Stop().finally(() => {
             if (proxy.Methods) {
                 const ids = Object.keys(proxy.Methods);
                 if (ids.length == 0)
@@ -178,7 +178,7 @@ const UnlockDialog = ({ proxy, host }) => {
                 <Button variant='primary' onClick={apply} isDisabled={busy} isLoading={busy}>
                     {_("Authenticate")}
                 </Button>
-                <Button variant='link' className='btn-cancel' onClick={cancel} isDisabled={!cancel}>
+                <Button variant='link' className='btn-cancel' onClick={cancel}>
                     {_("Cancel")}
                 </Button>
             </>);
@@ -203,7 +203,7 @@ const UnlockDialog = ({ proxy, host }) => {
             <Form isHorizontal>
                 <FormGroup fieldId="switch-to-admin-access-bridge-select"
                            label={_("Method")}>
-                    <FormSelect value={method} onChange={(_, method) => setMethod(method)} isDisabled={busy}>
+                    <FormSelect id="switch-to-admin-access-bridge-select" value={method} onChange={(_, method) => setMethod(method)} isDisabled={busy}>
                         { methods.map(m => <FormSelectOption value={m} key={m}
                                                              label={_(proxy.Methods[m].v.label.v)} />) }
                     </FormSelect>
@@ -215,8 +215,7 @@ const UnlockDialog = ({ proxy, host }) => {
                 <Button variant='primary' onClick={() => start(method)} isDisabled={busy} isLoading={busy}>
                     {_("Authenticate")}
                 </Button>
-                <Button variant='link' className='btn-cancel' onClick={busy ? cancel : D.close}
-                        isDisabled={busy && !cancel}>
+                <Button variant='link' className='btn-cancel' onClick={cancel}>
                     {_("Cancel")}
                 </Button>
             </>);
@@ -229,7 +228,7 @@ const UnlockDialog = ({ proxy, host }) => {
         <Modal isOpen
                position="top"
                variant="medium"
-               onClose={D.close}
+               onClose={cancel}
                title={title}
                titleIconVariant={title_icon}
                footer={footer}>
@@ -300,7 +299,11 @@ const SuperuserDialogs = ({ superuser_proxy, host, create_trigger }) => {
                  }
              });
 
-    const show = superuser_proxy.Current != "root" && superuser_proxy.Current != "init";
+    if (!superuser_proxy || !superuser_proxy.valid)
+        return;
+
+    const show = (superuser_proxy.Current != "root" && superuser_proxy.Current != "init" &&
+                  (superuser_proxy.Bridges?.length ?? 0) > 0);
     const unlocked = superuser_proxy.Current != "none";
 
     function unlock() {
@@ -311,7 +314,7 @@ const SuperuserDialogs = ({ superuser_proxy, host, create_trigger }) => {
         D.show(<LockDialog proxy={superuser_proxy} host={host} />);
     }
 
-    if (!show || !superuser_proxy.Bridges || superuser_proxy.Bridges.length == 0)
+    if (!show)
         return null;
 
     return create_trigger(unlocked, unlocked ? lock : unlock);

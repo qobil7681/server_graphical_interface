@@ -76,12 +76,27 @@ AC_ARG_ENABLE(ssh, AS_HELP_STRING([--disable-ssh], [Disable cockpit-ssh build an
 AM_CONDITIONAL(WITH_COCKPIT_SSH, test "$enable_ssh" != "no")
 AC_MSG_RESULT(${enable_ssh:=yes})
 
-# --enable-pybridge
-AC_MSG_CHECKING([whether to install the python cockpit-bridge])
-AC_ARG_ENABLE(pybridge, AS_HELP_STRING([--enable-pybridge], [Install python cockpit-bridge]))
-AM_CONDITIONAL(WITH_PYBRIDGE, test "$enable_pybridge" = "yes")
-AC_MSG_RESULT(${enable_pybridge:=no})
+# --enable-old-bridge
+AC_MSG_CHECKING([whether to install the old C cockpit-bridge])
+AC_ARG_ENABLE(old_bridge, AS_HELP_STRING([--enable-old-bridge], [Install old C cockpit-bridge]))
+AM_CONDITIONAL(WITH_OLD_BRIDGE, test "$enable_old_bridge" = "yes")
+AC_MSG_RESULT(${enable_old_bridge:=no})
 
+AC_SEARCH_LIBS([argp_parse], [argp])
+case "$ac_cv_search_argp_parse" in
+    no) AC_MSG_FAILURE([failed to find argp_parse]) ;;
+    -l*) argp_LIBS="$ac_cv_search_argp_parse" ;;
+    *) argp_LIBS= ;;
+esac
+AC_SUBST([argp_LIBS])
+
+AC_SEARCH_LIBS([fts_close], [fts])
+case "$ac_cv_search_fts_close" in
+    no) AC_MSG_FAILURE([failed to find fts_close]) ;;
+    -l*) fts_LIBS="$ac_cv_search_fts_close" ;;
+    *) fts_LIBS= ;;
+esac
+AC_SUBST([fts_LIBS])
 
 # pkg-config
 GLIB_API_VERSION="GLIB_VERSION_2_56"
@@ -353,6 +368,10 @@ AC_ARG_ENABLE([cockpit-client],
               [], [enable_cockpit_client=no])
 AC_MSG_RESULT($enable_cockpit_client)
 AM_CONDITIONAL([ENABLE_COCKPIT_CLIENT], [test "$enable_cockpit_client" = "yes"])
+
+if test "$enable_cockpit_client" = "yes" && test "$enable_old_bridge" = "yes"; then
+        AC_MSG_ERROR([--enable-cockpit-client conflicts with --enable-old-bridge])
+fi
 
 # Debug
 

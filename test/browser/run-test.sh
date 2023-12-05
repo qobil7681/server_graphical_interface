@@ -39,11 +39,6 @@ if [ "${TEST_OS#centos-}" != "$TEST_OS" ]; then
     TEST_OS="${TEST_OS}-stream"
 fi
 
-if [ "$ID" = "fedora" ]; then
-    # Testing Farm machines are really slow at some times of the day
-    export TEST_TIMEOUT_FACTOR=3
-fi
-
 TEST_ALLOW_JOURNAL_MESSAGES=""
 
 # HACK: CI hits this selinux denial. Unrelated to our tests.
@@ -67,6 +62,11 @@ export TEST_ALLOW_JOURNAL_MESSAGES
 TESTS=""
 EXCLUDES=""
 RC=0
+
+# make it easy to check in logs
+echo "TEST_ALLOW_JOURNAL_MESSAGES: ${TEST_ALLOW_JOURNAL_MESSAGES:-}"
+echo "TEST_AUDIT_NO_SELINUX: ${TEST_AUDIT_NO_SELINUX:-}"
+
 if [ "$PLAN" = "optional" ]; then
     TESTS="$TESTS
            TestAutoUpdates
@@ -77,14 +77,38 @@ if [ "$PLAN" = "optional" ]; then
     # Testing Farm machines often have pending restarts/reboot
     EXCLUDES="$EXCLUDES TestUpdates.testBasic TestUpdates.testFailServiceRestart TestUpdates.testKpatch"
 
+    # FIXME: creation dialog hangs forever
+    EXCLUDES="$EXCLUDES TestStorageISCSI.testISCSI"
+
     # These don't test more external APIs
     EXCLUDES="$EXCLUDES
               TestAutoUpdates.testBasic
               TestAutoUpdates.testPrivilegeChange
 
+              TestStorageFormat.testAtBoot
+              TestStorageFormat.testFormatCancel
+              TestStorageFormat.testFormatTooSmall
+              TestStorageFormat.testFormatTypes
+
+              TestStorageHidden.testHiddenRaid
+              TestStorageHidden.testHiddenSnap
+              TestStorageHiddenLuks.test
+
+              TestStorageMounting.testAtBoot
+              TestStorageMounting.testBadOption
+              TestStorageMounting.testFirstMount
+              TestStorageMounting.testMounting
+              TestStorageMounting.testMountingHelp
+              TestStorageMounting.testNeverAuto
+              TestStorageMountingLUKS.testEncryptedMountingHelp
+              TestStorageMountingLUKS.testDuplicateMountPoints
+              TestStorageMountingLUKS.testNeverAuto
+
+              TestStorageIgnored.testIgnored
               TestStoragePackagesNFS.testNfsMissingPackages
               TestStoragePartitions.testSizeSlider
-              TestStorageIgnored.testIgnored
+              TestStorageStratis.testAlerts
+              TestStorageUnused.testUnused
 
               TestUpdates.testUnprivileged
               TestUpdates.testPackageKitCrash
@@ -193,6 +217,7 @@ if [ "$PLAN" = "network" ]; then
 
               TestNetworkingBasic.testIpHelper
               TestNetworkingBasic.testNoService
+              TestNetworkingUnmanaged.testUnmanaged
               "
 fi
 

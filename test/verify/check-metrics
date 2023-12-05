@@ -14,7 +14,7 @@ from machine_core import ssh_connection
 
 def getMaximumSpike(test, g_type, saturation, hour, minute):
     # only for minutes with events, which have SVG graphs
-    sel = f"#metrics-hour-{hour} div.metrics-minute[data-minute={minute}] div.metrics-data-{g_type} div"
+    sel = f"#metrics-hour-{hour} div.metrics-minute[data-minute='{minute}'] div.metrics-data-{g_type} div"
     if saturation:
         sel += ":nth-child(2)"
     else:
@@ -31,7 +31,7 @@ def getCompressedMinuteValue(test, g_type, saturation, hour, minute):
     # only for minutes without events, which only have bars
 
     polygon_class = ".polygon-sat" if saturation else ".polygon-use"
-    sel = f"#metrics-hour-{hour} div.metrics-minute[data-minute={minute}] div.metrics-data-{g_type} .compressed{polygon_class}"
+    sel = f"#metrics-hour-{hour} div.metrics-minute[data-minute='{minute}'] div.metrics-data-{g_type} .compressed{polygon_class}"
     m = re.search(r"--%s:\s*([0-9.]+);" % (saturation and "saturation" or "utilization"), test.browser.attr(sel, "style"))
     test.assertIsNotNone(m)
     return float(m.group(1))
@@ -59,31 +59,31 @@ def prepareArchive(machine, name, time, hostname="localhost.localdomain"):
     if name.endswith("zip"):
         command = f"unzip /tmp/{name} -d /"
 
-    machine.execute("""ntp=`timedatectl show --property NTP --value`
+    machine.execute(f"""ntp=`timedatectl show --property NTP --value`
                        if [ $ntp == "yes" ]; then
                            timedatectl set-ntp off
                        fi
                        systemctl stop pmlogger
                        # don't let NM set transient host names from DHCP
                        systemctl stop NetworkManager
-                       hostnamectl set-hostname {2}
+                       hostnamectl set-hostname {hostname}
                        rm -rf /var/log/pcp/pmlogger/*
-                       {0}
+                       {command}
                        # set-ntp off is asynchronous; wait until timesyncd stops before the time can be set
                        while systemctl is-active systemd-timesyncd; do sleep 1; done
-                       timedatectl set-time @{1}""".format(command, time, hostname))
+                       timedatectl set-time @{time}""")
 
 
 def redisService(image):
-    if image.startswith("debian") or image.startswith("ubuntu"):
+    if image.startswith(("debian", "ubuntu")):
         return "redis-server"
     return "redis"
 
 
-def applySettings(browser):
-    browser.click("#pcp-settings-modal button.pf-m-primary")
+def applySettings(browser, dialog_selector):
+    browser.click(f"{dialog_selector} button.pf-m-primary")
     with browser.wait_timeout(30):
-        browser.wait_not_present("#pcp-settings-modal")
+        browser.wait_not_present(dialog_selector)
 
 
 def login(self):
@@ -122,6 +122,8 @@ class TestHistoryMetrics(testlib.MachineCase):
         super().setUp()
         # start with a clean slate and avoid running into restart limits
         self.machine.execute("systemctl stop pmlogger pmproxy; systemctl reset-failed pmlogger pmproxy 2>/dev/null || true")
+        # HACK: PF modal can have multiple id's in certain scenario's https://github.com/patternfly/patternfly-react/issues/9399
+        self.pcp_dialog_selector = "#pcp-settings-modal:first-child"
 
     def waitStream(self, current_max):
         # should only have at most <current_max> valid minutes, the rest should be empty
@@ -225,7 +227,7 @@ class TestHistoryMetrics(testlib.MachineCase):
         def events_at(hour, minute):
             b.wait_visible(f"#metrics-hour-{hour}.metrics-hour-compressed")
             b.click(f"#metrics-hour-{hour} button.metrics-events-expander")
-            events = b.text(f"#metrics-hour-{hour} div.metrics-minute[data-minute={minute}] .metrics-events")
+            events = b.text(f"#metrics-hour-{hour} div.metrics-minute[data-minute='{minute}'] .metrics-events")
             b.click(f"#metrics-hour-{hour} button.metrics-events-expander")
 
             return events
@@ -275,19 +277,21 @@ class TestHistoryMetrics(testlib.MachineCase):
         b.wait_in_text("#metrics-hour-1597662000000:not(.metrics-hour-compressed) .metrics-events-hour-header-expanded .spikes_count", "3 spikes")
         b.wait_in_text("#metrics-hour-1597662000000:not(.metrics-hour-compressed) .metrics-events-hour-header-expanded .spikes_info", "1 Memory, 1 Disk I/O, 1 Network I/O")
 
-        b.assert_pixels(".metrics", "metrics-history-expanded-hour", ignore=[".spikes_count"])
+        b.assert_pixels(".metrics", "metrics-history-expanded-hour", ignore=[".spikes_count"],
+                        wait_after_layout_change=True)
 
         b.click("#metrics-hour-1597662000000 button.metrics-events-expander")
         b.wait_in_text("#metrics-hour-1597662000000.metrics-hour-compressed", "1:00")
         b.wait_in_text("#metrics-hour-1597662000000.metrics-hour-compressed .spikes_count", "3 spikes")
         b.wait_in_text("#metrics-hour-1597662000000.metrics-hour-compressed .spikes_info", "1 Memory, 1 Disk I/O, 1 Network I/O")
 
-        b.assert_pixels(".metrics", "metrics-history-compressed-hour", ignore=[".nodata"], skip_layouts=["mobile", "rtl"])
+        b.assert_pixels(".metrics", "metrics-history-compressed-hour", ignore=[".nodata"],
+                        wait_after_layout_change=True)
 
         # Check that events are not visible for compressed hours
-        b.wait_not_present("#metrics-hour-1597662000000 div.metrics-minute[data-minute=28] .metrics-events")
+        b.wait_not_present("#metrics-hour-1597662000000 div.metrics-minute[data-minute='28'] .metrics-events")
         b.click("#metrics-hour-1597662000000 button.metrics-events-expander")
-        b.wait_visible("#metrics-hour-1597662000000 div.metrics-minute[data-minute=28] .metrics-events")
+        b.wait_visible("#metrics-hour-1597662000000 div.metrics-minute[data-minute='28'] .metrics-events")
 
         b.logout()
 
@@ -382,7 +386,7 @@ class TestHistoryMetrics(testlib.MachineCase):
 
         # at :54 the machine is loaded to ~80% so no event even if elevated
         self.assertGreater(getCompressedMinuteValue(test=self, g_type="memory", saturation=False, hour=1600236000000, minute=54), 0.8)
-        b.wait_not_present("#metrics-hour-1600236000000 div.metrics-minute[data-minute=54] .metrics-events")
+        b.wait_not_present("#metrics-hour-1600236000000 div.metrics-minute[data-minute='54'] .metrics-events")
         if have_swap:
             self.assertAlmostEqual(getCompressedMinuteValue(test=self, g_type="memory", saturation=True, hour=1600236000000, minute=54), 0.0)
 
@@ -446,13 +450,13 @@ class TestHistoryMetrics(testlib.MachineCase):
         login(self)
         b.wait_in_text(".metrics-heading", "CPU")
         b.click("#metrics-hour-1615197600000 button.metrics-events-expander")
-        b.wait_in_text("#metrics-hour-1615197600000 div.metrics-minute[data-minute=39] .metrics-events span.spikes_info", "Load")
+        b.wait_in_text("#metrics-hour-1615197600000 div.metrics-minute[data-minute='39'] .metrics-events span.spikes_info", "Load")
 
         # Now add the journal
         # Journal was recorded on Fedora 33 and when trying to use it with older systemd it fails with:
         # `Journal file /var/log/journal/*/journal.journal uses an unsupported feature, ignoring file.`
 
-        if self.machine.image in ["centos-8-stream", "rhel-8-7", "rhel-8-8", "rhel-8-9"]:
+        if self.machine.image == "centos-8-stream" or self.machine.image.startswith("rhel-8-"):
             return
 
         m.upload(["verify/files/metrics-archives/journal.journal.gz"], "/tmp")
@@ -463,7 +467,7 @@ class TestHistoryMetrics(testlib.MachineCase):
 
         b.wait_in_text(".metrics-heading", "CPU")
         b.click("#metrics-hour-1615197600000 button.metrics-events-expander")
-        b.click("#metrics-hour-1615197600000 div.metrics-minute[data-minute=39] .metrics-events button.spikes_info")
+        b.click("#metrics-hour-1615197600000 div.metrics-minute[data-minute='39'] .metrics-events button.spikes_info")
         b.wait_visible(".cockpit-log-message:contains('Created slice cockpittest.slice.')")
         b.wait_in_text(".cockpit-logline:first-child .cockpit-log-message", "cpu-piglet")
         b.click(".cockpit-logline:first-child .cockpit-log-message")
@@ -501,11 +505,11 @@ class TestHistoryMetrics(testlib.MachineCase):
 
         # enable pmlogger in settings dialog from empty state
         b.click(".pf-v5-c-empty-state button.pf-m-primary")
-        b.wait_visible("#pcp-settings-modal")
+        b.wait_visible(self.pcp_dialog_selector)
         b.wait_visible("#switch-pmlogger:not(:checked)")
         b.click("#switch-pmlogger")
         b.wait_visible("#switch-pmlogger:checked")
-        applySettings(b)
+        applySettings(b, self.pcp_dialog_selector)
 
         m.execute("until systemctl is-active pmlogger; do sleep 1; done")
 
@@ -558,22 +562,22 @@ class TestHistoryMetrics(testlib.MachineCase):
 
         # disable pmlogger in settings dialog from header bar
         b.click("#metrics-header-section button.pf-m-secondary")
-        b.wait_visible("#pcp-settings-modal")
+        b.wait_visible(self.pcp_dialog_selector)
         b.wait_visible("#switch-pmlogger:checked")
         b.click("#switch-pmlogger")
         b.wait_visible("#switch-pmlogger:not(:checked)")
-        applySettings(b)
+        applySettings(b, self.pcp_dialog_selector)
 
         self.assertEqual(m.execute("systemctl is-active pmlogger || true").strip(), "inactive")
         self.assertEqual(m.execute("systemctl is-enabled pmlogger || true").strip(), "disabled")
 
         # enable pmlogger in settings dialog from header bar
         b.click("#metrics-header-section button.pf-m-secondary")
-        b.wait_visible("#pcp-settings-modal")
+        b.wait_visible(self.pcp_dialog_selector)
         b.wait_visible("#switch-pmlogger:not(:checked)")
         b.click("#switch-pmlogger")
         b.wait_visible("#switch-pmlogger:checked")
-        applySettings(b)
+        applySettings(b, self.pcp_dialog_selector)
 
         m.execute("until systemctl is-active pmlogger; do sleep 1; done")
         self.assertEqual(m.execute("systemctl is-enabled pmlogger").strip(), "enabled")
@@ -598,11 +602,11 @@ class TestHistoryMetrics(testlib.MachineCase):
 
         def checkEnable(firewalld_alert):
             b.click("#metrics-header-section button.pf-m-secondary")
-            b.wait_visible("#pcp-settings-modal")
+            b.wait_visible(self.pcp_dialog_selector)
             b.wait_visible("#switch-pmproxy:not(:checked)")
             b.click('#switch-pmproxy')
             b.wait_visible('#switch-pmproxy:checked')
-            applySettings(b)
+            applySettings(b, self.pcp_dialog_selector)
             if firewalld_alert:
                 b.wait_visible(".pf-v5-c-alert:contains(pmproxy)")
             else:
@@ -616,11 +620,11 @@ class TestHistoryMetrics(testlib.MachineCase):
 
         def checkDisable():
             b.click("#metrics-header-section button.pf-m-secondary")
-            b.wait_visible("#pcp-settings-modal")
+            b.wait_visible(self.pcp_dialog_selector)
             b.wait_visible('#switch-pmproxy:checked')
             b.click('#switch-pmproxy')
             b.wait_visible("#switch-pmproxy:not(:checked)")
-            applySettings(b)
+            applySettings(b, self.pcp_dialog_selector)
             # always clears the firewalld alert
             b.wait_not_present(".pf-v5-c-alert:contains(pmproxy)")
             self.assertEqual(m.execute("! systemctl is-active pmproxy").strip(), "inactive")
@@ -640,14 +644,14 @@ class TestHistoryMetrics(testlib.MachineCase):
 
         # pmproxy can't be enabled without pmlogger
         b.click("#metrics-header-section button.pf-m-secondary")
-        b.wait_visible("#pcp-settings-modal")
+        b.wait_visible(self.pcp_dialog_selector)
         b.wait_visible("#switch-pmlogger:not(:checked)")
         b.wait_visible("#switch-pmproxy:not(:checked)")
         b.wait_visible("#switch-pmproxy:disabled")
         # enable pmlogger
         b.click('#switch-pmlogger')
         b.wait_visible('#switch-pmlogger:checked')
-        applySettings(b)
+        applySettings(b, self.pcp_dialog_selector)
         m.execute('while [ $(systemctl is-active pmlogger) = activating ]; do sleep 1; done')
         self.assertEqual(m.execute("systemctl is-active pmlogger").strip(), "active")
         b.wait_not_present(".pf-v5-c-alert:contains(pmproxy)")
@@ -717,6 +721,7 @@ class TestHistoryMetrics(testlib.MachineCase):
         b.select_PF4("#firewalld-request-pmproxy", "comeandgo")
         m.execute("firewall-cmd --permanent --delete-zone comeandgo; firewall-cmd  --reload")
         b.click(".pf-v5-c-alert button.pf-m-primary")
+        self.allow_browser_errors("Failed to enable pmproxy in firewalld:.*INVALID_ZONE: comeandgo.*")
         b.wait_in_text(".pf-v5-c-alert.pf-m-warning", "Failed to enable pmproxy in firewalld")
         b.wait_in_text(".pf-v5-c-alert.pf-m-warning", "INVALID_ZONE: comeandgo")
         # close warning
@@ -730,8 +735,8 @@ class TestHistoryMetrics(testlib.MachineCase):
                 b.click("#metrics-header-section button.pf-m-secondary")
                 b.wait_visible('#switch-pmproxy')
                 found = b.is_present("#switch-pmproxy" + (expected and ":checked" or ":not(:checked)"))
-                b.click("#pcp-settings-modal button.btn-cancel")
-                b.wait_not_present("#pcp-settings-modal")
+                b.click(f"{self.pcp_dialog_selector} button.btn-cancel")
+                b.wait_not_present(self.pcp_dialog_selector)
 
                 if found:
                     break
@@ -897,7 +902,6 @@ class TestCurrentMetrics(testlib.MachineCase):
         # AMD
         m.execute("rm -rf /tmp/sensor-sys-class/hwmon/hwmon1/*")
         m.write("/tmp/sensor-sys-class/hwmon/hwmon1/name", "k10temp")
-        # Tctl (temp1_input) will be ignored
         m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_label", "Tctl")
         m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_input", "40000")
         m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp1_max", "100000")
@@ -911,7 +915,7 @@ class TestCurrentMetrics(testlib.MachineCase):
         b.logout()
         self.login_and_go("/metrics")
 
-        b.wait_in_text("#current-metrics-card-cpu", "35 °C")
+        b.wait_in_text("#current-metrics-card-cpu", "40 °C")
         m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp3_input", "55000")
         b.wait_in_text("#current-metrics-card-cpu", "55 °C")
         m.write("/tmp/sensor-sys-class/hwmon/hwmon1/temp2_input", "90000")
@@ -984,7 +988,7 @@ class TestCurrentMetrics(testlib.MachineCase):
 
         # Test link to user services
         # older releases don't have CPU accounting enabled for user services
-        if m.image not in ["rhel-8-7", "rhel-8-8", "rhel-8-9", "centos-8-stream"]:
+        if self.machine.image != "centos-8-stream" and not self.machine.image.startswith("rhel-8-"):
             m.execute("su - admin -c 'XDG_RUNTIME_DIR=/run/user/$(id -u admin) systemd-run --user --collect --slice cockpittest -p CPUQuota=60% --unit cpu-userhog dd if=/dev/urandom of=/dev/null'")
             # user services are always running underneath user@1000.service, so these two will compete for row 1 or 2
             b.wait_in_text("table[aria-label='Top 5 CPU services'] tbody", "cpu-userhog")
@@ -1101,7 +1105,7 @@ BEGIN {{
 
         # Test link to user services
         # older releases don't have memory accounting enabled for user services
-        if m.image not in ["rhel-8-7", "rhel-8-8", "rhel-8-9", "centos-8-stream"]:
+        if m.image != "centos-8-stream" and not m.image.startswith("rhel-8"):
             m.execute("su - admin -c 'XDG_RUNTIME_DIR=/run/user/$(id -u admin) systemd-run --user --collect --slice cockpittest --unit mem-userhog memhog.sh'")
             m.execute("while [ ! -e /tmp/hogged ]; do sleep 1; done")
             # user services are always running underneath user@1000.service, so these two will compete for row 1 or 2
@@ -1174,17 +1178,16 @@ BEGIN {{
         # Disk usage
 
         # add 50 MB loopback disk; mount it once rw and once ro
-        m.execute("""set -e
-                  F=$(mktemp /var/tmp/loop.XXXX)
-                  dd if=/dev/zero of=$F bs=1M count=50
-                  mkfs -t ext3 $F
-                  mkdir -p /var/cockpittest /var/cockpit-ro-test
-                  mount -o loop $F /var/cockpittest
-                  RODEV=$(losetup -f --show $F)
-                  mount -r $RODEV /var/cockpit-ro-test
-                  losetup -d $RODEV
-                  rm $F
-                  """)
+        m.execute("""
+            F=$(mktemp /var/tmp/loop.XXXX)
+            dd if=/dev/zero of=$F bs=1M count=50
+            mkfs -t ext3 $F
+            mkdir -p /var/cockpittest /var/cockpit-ro-test
+            mount -o loop $F /var/cockpittest
+            RODEV=$(losetup -f --show $F)
+            mount -r $RODEV /var/cockpit-ro-test
+            losetup -d $RODEV
+            rm $F""")
         self.addCleanup(m.execute, "umount /var/cockpittest /var/cockpit-ro-test")
 
         self.assertLess(progressValue(self, ".pf-v5-c-progress[data-disk-usage-target='/var/cockpittest']"), 5)
@@ -1210,7 +1213,7 @@ BEGIN {{
             b.enter_page("/storage")
             # weird -- storage page does not show transient mount points, only permanent ones; so check for the device
             dev = m.execute("findmnt --noheadings -o SOURCE /var/cockpittest").strip()
-            b.wait_in_text("#mounts", dev)
+            b.wait_in_text('[data-test-card-title="Storage"]', dev.replace("/dev/", ""))
 
             b.go("/metrics")
             b.enter_page("/metrics")
@@ -1220,7 +1223,10 @@ BEGIN {{
             # without cockpit-storaged, mounts are not links
             self.restore_file("/usr/share/cockpit/storaged/manifest.json")
             m.write("/usr/share/cockpit/storaged/manifest.json", "")
-            self.allow_journal_messages("storaged: couldn't read manifest.json: JSON data was empty")
+            if self.is_pybridge():
+                self.allow_journal_messages(".*/storaged/manifest.json: Expecting value: line 1 column 1.*")
+            else:
+                self.allow_journal_messages("storaged: couldn't read manifest.json: JSON data was empty")
             login(self)
         b.wait_visible(progress_sel)
         self.assertFalse(b.is_present("#current-disks-usage button"))
@@ -1237,6 +1243,10 @@ BEGIN {{
         # has expected interfaces
         b.wait_in_text("[aria-label='Network usage'] [data-interface='cockpittest1']", "cockpittest1")
         b.wait_in_text("[aria-label='Network usage'] [data-interface='lo']", "lo")
+
+        # can jump to network interface details
+        b.wait_visible("[aria-label='Network usage'] [data-interface='cockpittest1'] button")
+        b.wait_visible("[aria-label='Network usage'] [data-interface='lo'] button")
 
         def rateMatches(label, regexp):
             text = b.text(f"[aria-label='Network usage'] [data-interface='lo'] td[data-label='{label}']")
@@ -1256,10 +1266,25 @@ BEGIN {{
         b.wait_text("[aria-label='Network usage'] [data-interface='cockpittest1'] td[data-label='In']", "0")
         b.wait_text("[aria-label='Network usage'] [data-interface='cockpittest1'] td[data-label='Out']", "0")
 
+        b.click("[aria-label='Network usage'] [data-interface='lo'] button")
+        b.enter_page("/network")
+        b.wait_visible("#network-interface-name:contains('lo')")
+        b.wait_in_text(".network-interface-details", "This device cannot be managed here.")
+
+        b.go("/metrics")
+        b.enter_page("/metrics")
+        b.click("[aria-label='Network usage'] [data-interface='cockpittest1'] button")
+        b.enter_page("/network")
+        b.wait_visible("#network-interface-name:contains('cockpittest1')")
+        b.wait_in_text(".network-interface-details", "This device cannot be managed here.")
+
 
 @testlib.skipImage("TODO: Arch Linux packagekit support", "arch")
 @testlib.skipDistroPackage()
 class TestMetricsPackages(packagelib.PackageCase):
+    # HACK: PF modal can have multiple id's in certain scenario's https://github.com/patternfly/patternfly-react/issues/9399
+    pcp_dialog_selector = "#pcp-settings-modal:first-child"
+
     def testBasic(self):
         b = self.browser
         m = self.machine
@@ -1270,7 +1295,7 @@ class TestMetricsPackages(packagelib.PackageCase):
             b.wait_not_present(".pf-v5-c-empty-state button.pf-m-primary")
 
             b.click("#metrics-header-section button.pf-m-secondary")
-            b.wait_visible("#pcp-settings-modal")
+            b.wait_visible(self.pcp_dialog_selector)
             b.wait_visible("#switch-pmlogger:not(:checked)")
             # no packagekit, can't enable
             b.wait_visible("#switch-pmlogger:disabled")
@@ -1329,11 +1354,11 @@ class TestMetricsPackages(packagelib.PackageCase):
         m.execute("pkcon remove -y cockpit-pcp pcp")
         self.login_and_go("/metrics")
         b.click("#metrics-header-section button.pf-m-secondary")
-        b.wait_visible("#pcp-settings-modal")
+        b.wait_visible(self.pcp_dialog_selector)
         b.wait_visible("#switch-pmlogger:not(:checked)")
         b.click("#switch-pmlogger")
         b.wait_visible("#switch-pmlogger:checked")
-        applySettings(b)
+        applySettings(b, self.pcp_dialog_selector)
         # install dialog
         b.click("#dialog button:contains('Install')")
         b.wait_not_present("#dialog")
@@ -1355,11 +1380,11 @@ class TestMetricsPackages(packagelib.PackageCase):
 
         # install redis
         b.click("#metrics-header-section button.pf-m-secondary")
-        b.wait_visible("#pcp-settings-modal")
+        b.wait_visible(self.pcp_dialog_selector)
         b.wait_visible("#switch-pmproxy:not(:checked)")
         b.click("#switch-pmproxy")
         b.wait_visible("#switch-pmproxy:checked")
-        applySettings(b)
+        applySettings(b, self.pcp_dialog_selector)
         # install dialog
         b.click("#dialog button:contains('Install')")
         b.wait_not_present("#dialog")
@@ -1398,26 +1423,26 @@ class TestMultiCPU(testlib.MachineCase):
         # Test current usage of cores
         b.wait_text("#current-cpu-usage-description", "2 CPUs")
         b.wait(lambda: progressValue(self, "#current-cpu-usage") < 20)
-        m.execute("systemd-run --collect --slice cockpittest -p CPUQuota=60% --unit cpu-hog dd if=/dev/urandom of=/dev/null")
-        m.execute("systemd-run --collect --slice cockpittest -p CPUQuota=30% --unit cpu-piglet dd if=/dev/urandom of=/dev/null")
+        m.execute("systemd-run --collect --slice cockpittest -p CPUQuota=50% --unit cpu-hog dd if=/dev/urandom of=/dev/null")
+        m.execute("systemd-run --collect --slice cockpittest -p CPUQuota=20% --unit cpu-piglet dd if=/dev/urandom of=/dev/null")
         # View all CPUs
         b.click("#current-metrics-card-cpu button")
-        b.wait(lambda: int(b.text(".pf-v5-c-popover .cpu-all dd:nth-of-type(1)")[:-1]) > 50)
-        b.wait(lambda: int(b.text(".pf-v5-c-popover .cpu-all dd:nth-of-type(2)")[:-1]) > 20)
+        b.wait(lambda: int(b.text(".pf-v5-c-popover .cpu-all dd:nth-of-type(1)")[:-1]) > 40)
+        b.wait(lambda: int(b.text(".pf-v5-c-popover .cpu-all dd:nth-of-type(2)")[:-1]) > 15)
         b.click(".pf-v5-c-popover button")
         b.wait_not_present(".pf-v5-c-popover")
 
         # the top CPU core runs cpu-hog
-        b.wait(lambda: progressValue(self, "#current-top-cpu-usage") >= 58)
-        b.wait(lambda: progressValue(self, "#current-top-cpu-usage") <= 70)
+        b.wait(lambda: progressValue(self, "#current-top-cpu-usage") >= 38)
+        # the hoglet gets scheduled between core 1 and 2
+        b.wait(lambda: progressValue(self, "#current-top-cpu-usage") <= 80)
         # looks like "average: 45% max: 60%"
-        b.wait(lambda: int(b.text("#current-cpu-usage .pf-v5-c-progress__status").split()[-1].rstrip('%')) >= 58)
-        b.wait(lambda: int(b.text("#current-cpu-usage .pf-v5-c-progress__status").split()[-1].rstrip('%')) <= 70)
+        b.wait(lambda: int(b.text("#current-cpu-usage .pf-v5-c-progress__status").split()[-1].rstrip('%')) >= 38)
+        b.wait(lambda: int(b.text("#current-cpu-usage .pf-v5-c-progress__status").split()[-1].rstrip('%')) <= 80)
 
 
 @testlib.skipOstree("no PCP support")
 @testlib.skipDistroPackage()
-@testlib.skipMobile()
 class TestGrafanaClient(testlib.MachineCase):
 
     provision = {
@@ -1430,6 +1455,9 @@ class TestGrafanaClient(testlib.MachineCase):
         m = self.machine
         b = self.browser
         mg = self.machines['services']
+
+        # HACK: PF modal can have multiple id's in certain scenario's https://github.com/patternfly/patternfly-react/issues/9399
+        pcp_dialog_selector = "#pcp-settings-modal:first-child"
 
         # avoid dynamic host name changes during PCP data collection, and start from clean slate
         m.execute("""systemctl stop pmlogger || true
@@ -1448,19 +1476,19 @@ class TestGrafanaClient(testlib.MachineCase):
         b.wait_in_text(".pf-v5-c-empty-state", "Metrics history could not be loaded")
         b.wait_in_text(".pf-v5-c-empty-state", "pmlogger.service is not running")
         b.click(".pf-v5-c-empty-state button.pf-m-primary")
-        b.wait_visible("#pcp-settings-modal")
+        b.wait_visible(pcp_dialog_selector)
         b.wait_visible("#switch-pmlogger:not(:checked)")
         b.click("#switch-pmlogger")
         b.wait_visible("#switch-pmlogger:checked")
-        applySettings(b)
+        applySettings(b, pcp_dialog_selector)
 
         # enable pmproxy+redis (none of our test OSes have both of them running by default)
         b.click("#metrics-header-section button.pf-m-secondary")
-        b.wait_visible("#pcp-settings-modal")
+        b.wait_visible(pcp_dialog_selector)
         b.wait_visible("#switch-pmproxy:not(:checked)")
         b.click('#switch-pmproxy')
         b.wait_visible('#switch-pmproxy:checked')
-        applySettings(b)
+        applySettings(b, pcp_dialog_selector)
 
         # enable pmproxy service in firewalld in the alert
         b.wait_visible("#firewalld-request-pmproxy")
@@ -1475,15 +1503,6 @@ class TestGrafanaClient(testlib.MachineCase):
             bg.set_input_text("input[name='password']", "foobar")
             bg.click("button:contains('Log in')")
             bg.wait_in_text("body", "Add your first data source")
-
-            # HACK Unsigned plugin needs to be enabled manually
-            # See https://github.com/performancecopilot/grafana-pcp/issues/94
-            bg.open("/plugins/performancecopilot-pcp-app")
-            with bg.wait_timeout(30):
-                bg.wait_visible(".gf-form-button-row button")
-                if bg.text(".gf-form-button-row button") == "Enable":
-                    bg.click(".gf-form-button-row button")
-                    bg.wait_text(".gf-form-button-row button", "Disable")
 
             # Add the PCP redis data source for our client machine
             # Cog (Configuration) menu → Data Sources → Add
@@ -1513,7 +1532,7 @@ class TestGrafanaClient(testlib.MachineCase):
             # .. and the dashboard name becomes clickable
             bg.click("a:contains('PCP Redis: Host Overview')")
 
-            bg.wait_in_text(".submenu-controls", "grafana-client")
+            bg.wait_in_text("#var-host", "grafana-client")
 
             # expect a "Load average" panel with a sensible number
             max_load = bg.text("div:contains('Load average') .graph-legend-series:contains('1 minute') .max")

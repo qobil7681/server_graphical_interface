@@ -1,5 +1,6 @@
 import argparse
 import base64
+import gzip
 import hashlib
 import lzma
 import os
@@ -7,26 +8,27 @@ import shutil
 import subprocess
 import tarfile
 import zipfile
-from typing import Dict, Iterable, Optional
+from typing import AnyStr, Dict, Iterable, Optional
 
 from cockpit import __version__
 
-PACKAGE = f'cockpit-{__version__}'
+VERSION = __version__ or '0'
+PACKAGE = f'cockpit-{VERSION}'
 TAG = 'py3-none-any'
 
 
 def find_sources(*, srcpkg: bool) -> Iterable[str]:
     try:
-        subprocess.check_call(['modules/checkout'], stdout=2)       # Needed for git builds...
+        subprocess.check_call(['vendor/checkout'], stdout=2)       # Needed for git builds...
     except FileNotFoundError:                                       # ...but not present in tarball...
         pass                                                        # ...and not needed either, because...
     assert os.path.exists('src/cockpit/_vendor/ferny/__init__.py')  # ...the code should exist there already.
 
     if srcpkg:
-        yield from {
+        yield from (
             'pyproject.toml',
             'src/build_backend.py',
-        }
+        )
 
     for path, _dirs, files in os.walk('src', followlinks=True):
         if '__init__.py' in files:
@@ -44,9 +46,11 @@ def build_sdist(sdist_directory: str,
                 config_settings: Optional[Dict[str, object]] = None) -> str:
     del config_settings
     sdist_filename = f'{PACKAGE}.tar.gz'
-    with tarfile.open(f'{sdist_directory}/{sdist_filename}', 'w:gz', dereference=True) as sdist:
-        for filename in find_sources(srcpkg=True):
-            sdist.add(filename, arcname=f'{PACKAGE}/{filename}', )
+    # We do this manually to avoid adding timestamps.  See https://bugs.python.org/issue31526
+    with gzip.GzipFile(f'{sdist_directory}/{sdist_filename}', mode='w', mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode='w|', dereference=True) as sdist:
+            for filename in find_sources(srcpkg=True):
+                sdist.add(filename, arcname=f'{PACKAGE}/{filename}', )
     return sdist_filename
 
 
@@ -65,16 +69,20 @@ def build_wheel(wheel_directory: str,
         'METADATA': [
             'Metadata-Version: 2.1',
             'Name: cockpit',
-            f'Version: {__version__}',
+            f'Version: {VERSION}',
         ],
         'entry_points.txt': [
             '[console_scripts]',
-            'cockpit-bridge = cockpit.bridge:main',
             'cockpit-askpass = cockpit._vendor.ferny.interaction_client:main',
+            'cockpit-bridge = cockpit.bridge:main',
         ],
     }
 
     with zipfile.ZipFile(f'{wheel_directory}/{wheel_filename}', 'w') as wheel:
+        def write(filename: str, data: AnyStr) -> None:
+            # we do this manually to avoid adding timestamps
+            wheel.writestr(zipfile.ZipInfo(filename), data)
+
         def beipack_self(main: str, args: str = '') -> bytes:
             from cockpit._vendor.bei import beipack
             contents = {name: wheel.read(name) for name in wheel.namelist()}
@@ -82,7 +90,7 @@ def build_wheel(wheel_directory: str,
             return lzma.compress(pack, preset=lzma.PRESET_EXTREME)
 
         def write_distinfo(filename: str, lines: Iterable[str]) -> None:
-            wheel.writestr(f'{PACKAGE}.dist-info/{filename}', ''.join(f'{line}\n' for line in lines))
+            write(f'{PACKAGE}.dist-info/{filename}', ''.join(f'{line}\n' for line in lines))
 
         def record_lines() -> Iterable[str]:
             for info in wheel.infolist():
@@ -92,9 +100,10 @@ def build_wheel(wheel_directory: str,
             yield f'{PACKAGE}.dist-info/RECORD,,'
 
         for filename in find_sources(srcpkg=False):
-            wheel.write(filename, arcname=os.path.relpath(filename, start='src'))
+            with open(filename, 'rb') as file:
+                write(os.path.relpath(filename, start='src'), file.read())
 
-        wheel.writestr('cockpit/data/cockpit-bridge.beipack.xz', beipack_self('cockpit.bridge:main', 'beipack=True'))
+        write('cockpit/data/cockpit-bridge.beipack.xz', beipack_self('cockpit.bridge:main', 'beipack=True'))
 
         for filename, lines in distinfo.items():
             write_distinfo(filename, lines)

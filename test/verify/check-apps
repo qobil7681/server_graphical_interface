@@ -16,6 +16,7 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+import time
 
 import packagelib
 import testlib
@@ -31,19 +32,19 @@ class TestApps(packagelib.PackageCase):
         self.appstream_collection = set()
         self.machine.upload(["verify/files/test.png"], "/var/tmp/")
 
-    def createAppStreamPackage(self, name, version, revision):
+    def createAppStreamPackage(self, name, version, revision, install=False):
         self.createPackage(name, version, revision, content={
             f"/usr/share/metainfo/org.cockpit-project.{name}.metainfo.xml": f"""
 <component type="addon">
   <extends>org.cockpit_project.cockpit</extends>
   <id>org.cockpit-project.{name}</id>
-  <icon type="local">/usr/share/pixmaps/test.png</icon>
+  <icon type="local">/usr/share/pixmaps/{name}.png</icon>
   <name>{name}</name>
-  <summary>An application for testing</summary>
+  <summary>{name} application for testing</summary>
   <launchable type="cockpit-manifest">{name}</launchable>
 </component>
 """,
-            "/usr/share/pixmaps/test.png": {"path": "/var/tmp/test.png"}})
+            f"/usr/share/pixmaps/{name}.png": {"path": "/var/tmp/test.png"}}, install=install)
         self.appstream_collection.add(name)
 
     def createAppStreamRepoPackage(self):
@@ -99,16 +100,25 @@ class TestApps(packagelib.PackageCase):
             m.write("/etc/cockpit/cockpit.conf", f"[WebService]\nUrlRoot={urlroot}")
 
         self.login_and_go("/apps", urlroot=urlroot)
-        b.wait_visible(".pf-v5-c-empty-state")
+        b.wait_in_text(".pf-v5-c-empty-state", "No applications installed or available")
+        b.wait_in_text(".pf-v5-c-empty-state", "Application information is missing")
+
+        # still no metadata, but already installed application
+        self.createAppStreamPackage("already", "1.0", "1", install=True)
+        b.wait_not_present(".pf-v5-c-empty-state")
+        b.wait_visible(".app-list .pf-v5-c-data-list__item-row:contains('already') button:contains('Remove')")
+        b.wait_in_text(".pf-v5-c-alert", "Application information is missing")
 
         self.createAppStreamPackage("app-1", "1.0", "1")
         self.createAppStreamRepoPackage()
 
-        # Refresh package info
-        b.click("#refresh")
+        # Install package metadata
+        b.click(".pf-v5-c-alert button")
 
         with b.wait_timeout(30):
+            b.wait_not_present(".pf-v5-c-alert")
             b.click(".app-list #app-1")
+
         b.wait_visible('a[href="https://app-1.com"]')
         b.wait_visible(f'#app-page img[src^="{urlroot}/cockpit/channel/"]')
         b.click(".pf-v5-c-breadcrumb a:contains('Applications')")
@@ -128,6 +138,64 @@ class TestApps(packagelib.PackageCase):
 
     def testWithUrlRoot(self):
         self.testBasic(urlroot="/webcon")
+
+    def testOsMap(self):
+        b = self.browser
+        m = self.machine
+
+        self.allow_journal_messages("can't remove watch: Invalid argument")
+
+        self.restore_dir("/usr/share/metainfo", reboot_safe=True)
+        self.restore_dir("/usr/share/app-info", reboot_safe=True)
+        self.restore_dir("/var/cache/app-info", reboot_safe=True)
+
+        # Make sure none of the appstream directories exist.  They
+        # will be created later and we need to cope with that.
+        m.execute("rm -rf /usr/share/metainfo /usr/share/app-info /var/cache/app-info")
+
+        # use a fake distro map
+        self.write_file("/etc/cockpit/apps.override.json",
+                        '{ "config": { "appstream_data_packages":'
+                        '    {"testy": ["appstream-data-test"], "otheros": ["nosuchpackage"]},'
+                        '              "appstream_config_packages": []'
+                        '  }}')
+
+        self.createAppStreamPackage("app-1", "1.0", "1")
+        self.createAppStreamRepoPackage()
+
+        self.login_and_go("/apps")
+        b.wait_visible(".pf-v5-c-empty-state")
+
+        # os-release is a symlink target, don't clobber that
+        self.restore_file("/etc/os-release")
+        m.execute("rm /etc/os-release")
+
+        # get along with absent os-release
+        b.click("#refresh")
+        # the progress bar is too fast to reliably catch it
+        time.sleep(1)
+        b.wait_not_present("#refresh-progress")
+        b.wait_visible(".pf-v5-c-empty-state")
+        # wait until check for installed metadata package finished
+        b.wait_attr("#list-page", "data-packages-checked", "true")
+        # no appstream metadata available, don't advertise it
+        b.wait_in_text(".pf-v5-c-empty-state", "No applications installed or available")
+        self.assertNotIn("Install application information", b.text(".pf-v5-c-empty-state"))
+        b.wait_not_present(".pf-v5-c-empty-state button")
+
+        # unknown OS: nothing gets installed
+        m.write("/etc/os-release", 'ID="unmapped"\nID_LIKE="mysterious"\nVERSION_ID="1"\n')
+        b.click("#refresh")
+        # the progress bar is too fast to reliably catch it
+        time.sleep(1)
+        b.wait_not_present("#refresh-progress")
+        b.wait_visible(".pf-v5-c-empty-state")
+
+        # known OS: appstream-data-test gets installed from the map
+        m.write("/etc/os-release", 'ID="derivative"\nID_LIKE="spicy testy"\nVERSION_ID="1"\n')
+        b.click("#refresh")
+        m.execute("until test -e /usr/share/app-info/xmls/test.xml; do sleep 1; done")
+        b.wait_visible(".app-list #app-1")
 
     def testL10N(self):
         b = self.browser
@@ -172,10 +240,7 @@ class TestApps(packagelib.PackageCase):
             b.open_session_menu()
             b.click(".display-language-menu")
             b.wait_visible('#display-language-modal')
-            if self.system_before(242):  # Changed in #15667
-                b.set_val("#display-language-modal select", lang)
-            else:
-                b.click(f'#display-language-modal li[data-value={lang}] button')
+            b.click(f'#display-language-modal li[data-value={lang}] button')
             b.click("#display-language-modal footer button.pf-m-primary")
             b.wait_language(lang)
             b.enter_page("/apps")

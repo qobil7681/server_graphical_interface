@@ -4,21 +4,24 @@ backend-path = ['src']
 build-backend = 'build_backend'
 
 [tool.mypy]
-mypy_path = 'src/cockpit:test/common'
+mypy_path = 'src:test/common'
 exclude = '_vendor'
 [[tool.mypy.overrides]]
-module = ["cockpit._vendor.*"]
+module = ["cockpit._vendor.*", "dbus", "gi.*", "task", "vdo.*"]
 follow_imports = 'silent'
+ignore_missing_imports = true
 
 [tool.pylint]
 max-line-length = 118
 disable = [
   "C0114",  # Missing module docstring
   "C0115",  # Missing class docstring
+  "C0116",  # Missing function or method docstring
   "R0902",  # Too many instance attributes
   "R0903",  # Too few public methods
   "R0913",  # Too many arguments
   "R1705",  # Unnecessary "else" after "return"
+  "W0120",  # Else clause on loop without a break statement
   "W1113",  # Keyword argument before variable positional arguments  (PEP-570 is Python 3.8)
 ]
 
@@ -37,6 +40,7 @@ select = [
     "I",       # isort
     "ICN",     # flake8-import-conventions
     "ISC",     # flake8-implicit-str-concat
+    "PIE",     # flake8-pie
     "PLE",     # pylint errors
     "PGH",     # pygrep-hooks
     "PT",      # flake8-pytest-style
@@ -44,6 +48,7 @@ select = [
     "RUF",     # ruff rules
     "T10",     # flake8-debugger
     "TCH",     # flake8-type-checking
+    "UP032",   # f-string
     "W",       # warnings (mostly whitespace)
     "YTT",     # flake8-2020
 ]
@@ -58,6 +63,8 @@ ignore = [
     "E731",  # Do not assign a `lambda` expression, use a `def`
     "PT011", # `pytest.raises(OSError)` is too broad
     "RUF012", # Mutable class attributes should be annotated with `typing.ClassVar`
+    "TCH001", # Move application import into a type-checking block
+    "TCH002", # Move third-party import `..packages.Packages` into a type-checking block
 ]
 line-length = 118
 src = []
@@ -70,7 +77,6 @@ mark-parentheses = false
 known-first-party = ["cockpit"]
 
 [tool.pytest.ini_options]
-asyncio_mode = 'auto'
 addopts = ['--strict-markers']  # cf. https://github.com/cockpit-project/cockpit/pull/18584#issuecomment-1490243994
 pythonpath = ["src"]
 testpaths = ["test/pytest"]
@@ -113,18 +119,36 @@ exclude_lines = [
 [tool.tox]
 legacy_tox_ini = """
 [tox]
+envlist = lint,pytest
 isolated_build = True
-envlist = site
+labels =
+  venv = py311-lint, py3{6,7,8,9,10,11,12}-pytest
 
-[testenv]
-deps=
-  pytest-asyncio
-  pytest-cov
-  pytest-timeout
-commands=
-  python3 -m pytest -opythonpath= --cov {posargs}
-
-[testenv:site]
+# The default test environments use system packages and never PyPI.
+[testenv:{lint,pytest}]
 sitepackages = True
-deps=
+install_command = python3 -m pip install --no-index --no-build-isolation {opts} {packages}
+wheel_build_env = pkg
+
+# All other environments (names like py311-lint, py36-pytest, etc) are isolated
+# from the system and get their packages from PyPI, according to the specific
+# test environment being requested.  We build the wheel in a common environment.
+[testenv]
+package = wheel
+wheel_build_env = venv-pkg
+skip_install = lint: True
+deps =
+  lint: mypy
+  lint: flake8
+  lint: ruff
+  lint: vulture
+  pytest
+  pytest-asyncio
+  pytest: pytest-cov
+  pytest: pytest-timeout
+  pytest: pytest-xdist
+allowlist_externals = test/static-code
+commands =
+  pytest: python3 -m pytest -opythonpath= {posargs}
+  lint: test/static-code --tap
 """

@@ -27,6 +27,7 @@ import { Gallery } from "@patternfly/react-core/dist/esm/layouts/Gallery/index.j
 import { DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm } from "@patternfly/react-core/dist/esm/components/DescriptionList/index.js";
 import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { Grid, GridItem } from "@patternfly/react-core/dist/esm/layouts/Grid/index.js";
+import { Icon } from "@patternfly/react-core/dist/esm/components/Icon/index.js";
 import { Modal } from "@patternfly/react-core/dist/esm/components/Modal/index.js";
 import { Page, PageGroup, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
 import { Popover } from "@patternfly/react-core/dist/esm/components/Popover/index.js";
@@ -223,23 +224,16 @@ function decompress_samples(samples, state) {
     });
 }
 
-function make_rows(rows, rowWrapper, _columns) {
-    return rows.map((columns, rowIndex) => {
-        const props = rowWrapper ? rowWrapper(columns) : {};
-
-        return (
-            <Tr key={"row-" + rowIndex} {...props}>
-                {columns.map((column, columnIndex) => {
-                    const dataLabel = _columns && _columns[columnIndex];
-                    return (
-                        <Td data-label={dataLabel} key={"column-" + columnIndex}>
-                            {column}
-                        </Td>
-                    );
-                })}
-            </Tr>
-        );
-    });
+function make_rows(rows, rowProps, columnLabels) {
+    return rows.map((columns, rowIndex) =>
+        <Tr key={"row-" + rowIndex} {...rowProps?.(columns)}>
+            {columns.map((column, columnIndex) =>
+                <Td data-label={columnLabels?.[columnIndex]} key={"column-" + columnIndex}>
+                    {column}
+                </Td>
+            )}
+        </Tr>
+    );
 }
 
 class CurrentMetrics extends React.Component {
@@ -257,6 +251,7 @@ class CurrentMetrics extends React.Component {
         this.cgroupMemoryNames = [];
         this.cgroupDiskNames = [];
         this.disksNames = [];
+        this.cpuTemperature = null;
         this.cpuTemperatureColors = {
             textColor: "",
             iconColor: "",
@@ -325,7 +320,7 @@ class CurrentMetrics extends React.Component {
 
         if (!cockpit.hidden && (this.temperature_channel === null)) {
             this.temperature_channel = cockpit.channel({ payload: "metrics1", source: "internal", interval: INTERVAL, metrics: CPU_TEMPERATURE_METRICS });
-            this.temperature_channel.addEventListener("close", (ev, error) => console.error("CPU temperature metric closed:", error));
+            this.temperature_channel.addEventListener("close", (ev, error) => console.warn("CPU temperature metric closed:", error));
             this.temperature_channel.addEventListener("message", this.onTemperatureUpdate);
         }
 
@@ -431,7 +426,13 @@ class CurrentMetrics extends React.Component {
 
         data.forEach(temperatureSamples => decompress_samples(temperatureSamples, this.temperatureSamples));
 
-        this.cpuTemperature = parseInt(Math.max(...this.temperatureSamples[0]));
+        if (this.temperatureSamples[0].length > 0) {
+            this.cpuTemperature = Math.round(Math.max(...this.temperatureSamples[0]));
+        } else {
+            // close the channel when bridge couldn't sample temperature
+            this.temperature_channel.close("No samples received");
+            return;
+        }
 
         if (this.cpuTemperature <= 80) {
             this.cpuTemperatureColors.textColor = "";
@@ -624,7 +625,7 @@ class CurrentMetrics extends React.Component {
     getCachedPodName = (uid, containerid) => this.state.podNameMapping[uid] && this.state.podNameMapping[uid][containerid];
 
     cgroupRow = (name, is_user, is_container, uid, ...values) => {
-        const podman_installed = cockpit.manifests && cockpit.manifests.podman;
+        const podman_installed = cockpit.manifests?.podman;
 
         const cgroupClickHandler = (name, isUser, isContainer, uid) => {
             if (isContainer) {
@@ -705,10 +706,9 @@ class CurrentMetrics extends React.Component {
         const memUsedFraction = memTotal ? this.state.memUsed / memTotal : 0;
         const memAvail = memTotal ? (memTotal - this.state.memUsed) : 0;
         const num_cpu_str = cockpit.format(cockpit.ngettext("$0 CPU", "$0 CPUs", numCpu), numCpu);
-        const have_storage = cockpit.manifests && cockpit.manifests.storage;
 
         const netIO = this.netInterfacesNames.map((iface, i) => [
-            iface,
+            <Button variant="link" isInline onClick={() => cockpit.jump(`/network#/${iface}`) } key={iface}>{iface}</Button>,
             this.state.netInterfacesRx[i] >= 1 ? cockpit.format_bytes_per_sec(this.state.netInterfacesRx[i]) : "0",
             this.state.netInterfacesTx[i] >= 1 ? cockpit.format_bytes_per_sec(this.state.netInterfacesTx[i]) : "0",
         ]);
@@ -726,7 +726,7 @@ class CurrentMetrics extends React.Component {
                         value={this.state.swapUsed}
                         className="pf-m-sm"
                         min={0} max={swapTotal}
-                        variant={swapUsedFraction > 0.9 ? ProgressVariant.danger : null}
+                        variant={swapUsedFraction > 0.9 ? ProgressVariant.danger : swapUsedFraction >= 0.8 ? ProgressVariant.warning : null}
                         label={ cockpit.format(_("$0 available"), cockpit.format_bytes(swapAvail)) } />
                 </Tooltip>);
         }
@@ -757,9 +757,9 @@ class CurrentMetrics extends React.Component {
                            aria-label={_("Current top CPU usage")}
                            id="current-top-cpu-usage"
                            value={top_cores[0][1]}
-                           className="pf-m-sm"
+                           className="current-top-cpu-usage pf-m-sm"
                            min={0} max={100}
-                           variant={ top_cores[0][1] > 90 ? ProgressVariant.danger : ProgressVariant.info }
+                           variant={ top_cores[0][1] > 90 ? ProgressVariant.danger : top_cores[0][1] >= 80 ? ProgressVariant.warning : ProgressVariant.info }
                            measureLocation="none" />;
 
             allCpus = (
@@ -781,7 +781,7 @@ class CurrentMetrics extends React.Component {
             : [];
 
         let allDisks = null;
-        const rowWrapperDisks = row => ({ 'device-name': row[0] });
+        const rowPropsDisks = row => ({ 'device-name': row[0] });
         const diskColumns = [_("Device"), _("Read"), _("Write")];
         if (disksUsage.length > 1) {
             const disksTableContent = (
@@ -794,7 +794,7 @@ class CurrentMetrics extends React.Component {
                         <Tr>{diskColumns.map(col => <Th key={col}>{col}</Th>)}</Tr>
                     </Thead>
                     <Tbody className="pf-v5-m-tabular-nums disks-nowrap">
-                        {make_rows(disksUsage, rowWrapperDisks, diskColumns)}
+                        {make_rows(disksUsage, rowPropsDisks, diskColumns)}
                     </Tbody>
                 </Table>
             );
@@ -806,8 +806,9 @@ class CurrentMetrics extends React.Component {
             );
         }
 
-        const rowWrapperIface = row => ({ 'data-interface': row[0] });
-        const rowWrapperDiskIO = row => ({ 'cgroup-name': row[0] });
+        // first element is the jump button, key is interface name
+        const rowPropsIface = row => ({ 'data-interface': row[0].key });
+        const rowPropsDiskIO = row => ({ 'cgroup-name': row[0] });
         const topServicesCPUColumns = [_("Service"), "%"];
         const topServicesMemoryColumns = [_("Service"), _("Used")];
         const ifaceColumns = [_("Interface"), _("In"), _("Out")];
@@ -817,7 +818,7 @@ class CurrentMetrics extends React.Component {
                 <Card id="current-metrics-card-cpu">
                     <CardHeader className='align-baseline'>
                         <CardTitle>{ _("CPU") }</CardTitle>
-                        { !isNaN(this.cpuTemperature) &&
+                        { this.cpuTemperature !== null &&
                         <span className="temperature">
                             <span className={this.cpuTemperatureColors.iconColor}>
                                 {this.cpuTemperatureColors.icon}
@@ -833,9 +834,9 @@ class CurrentMetrics extends React.Component {
                             <Progress
                                 id="current-cpu-usage"
                                 value={this.state.cpuUsed}
-                                className="pf-m-sm"
+                                className="current-cpu-usage pf-m-sm"
                                 min={0} max={100}
-                                variant={ this.state.cpuUsed > 90 ? ProgressVariant.danger : null }
+                                variant={ this.state.cpuUsed > 90 ? ProgressVariant.danger : this.state.cpuUsed >= 80 ? ProgressVariant.warning : null }
                                 title={ num_cpu_str }
                                 label={ cpu_label } />
                             {topCore}
@@ -888,7 +889,7 @@ class CurrentMetrics extends React.Component {
                                     value={memTotal ? this.state.memUsed : undefined}
                                     className="pf-m-sm"
                                     min={0} max={memTotal}
-                                    variant={memUsedFraction > 0.9 ? ProgressVariant.danger : null}
+                                    variant={memUsedFraction > 0.9 ? ProgressVariant.danger : memUsedFraction >= 0.8 ? ProgressVariant.warning : null}
                                     label={ memAvail ? cockpit.format(_("$0 available"), cockpit.format_bytes(memAvail)) : "" } />
                             </Tooltip>
                             {swapProgress}
@@ -936,11 +937,11 @@ class CurrentMetrics extends React.Component {
                                         data-disk-usage-target={info.target}
                                         value={info.use} min={0} max={100}
                                         className="pf-m-sm"
-                                        variant={info.use > 90 ? ProgressVariant.danger : null}
+                                        variant={info.use > 90 ? ProgressVariant.danger : info.use >= 80 ? ProgressVariant.warning : null}
                                         title={info.target}
                                         label={ cockpit.format(_("$0 free"), cockpit.format_bytes(info.avail, 1000)) } />
                                 );
-                                if (have_storage)
+                                if (cockpit.manifests?.storage)
                                     progress = <Button variant="link" isInline onClick={() => cockpit.jump("/storage") }>{progress}</Button>;
 
                                 return (
@@ -968,7 +969,7 @@ class CurrentMetrics extends React.Component {
                                     </Tr>
                                 </Thead>
                                 <Tbody className="pf-v5-m-tabular-nums">
-                                    {make_rows(this.state.topServicesDiskIO, rowWrapperDiskIO, [_("Service"), _("Read"), _("Write")])}
+                                    {make_rows(this.state.topServicesDiskIO, rowPropsDiskIO, [_("Service"), _("Read"), _("Write")])}
                                 </Tbody>
                             </Table> }
                     </CardBody>
@@ -989,7 +990,7 @@ class CurrentMetrics extends React.Component {
                                 <Tr>{ifaceColumns.map(col => <Th key={col}>{col}</Th>)}</Tr>
                             </Thead>
                             <Tbody className="network-nowrap-shrink">
-                                {make_rows(netIO, rowWrapperIface, ifaceColumns)}
+                                {make_rows(netIO, rowPropsIface, ifaceColumns)}
                             </Tbody>
                         </Table>
                     </CardBody>
@@ -1322,7 +1323,7 @@ const HourDescription = ({ minute_events, isHourExpanded, onToggleHourExpanded, 
     return (
         <span className={"metrics-events" + (isHourExpanded ? " metrics-events-hour-header-expanded" : "")}>
             {spikes > 0 &&
-                <Button variant="plain" className="metrics-events-expander" onClick={() => onToggleHourExpanded(!isHourExpanded)} icon={isHourExpanded ? <AngleDownIcon /> : <AngleRightIcon />} />}
+                <Button variant="plain" className="metrics-events-expander" onClick={() => onToggleHourExpanded(!isHourExpanded)} icon={isHourExpanded ? <AngleDownIcon /> : <Icon shouldMirrorRTL><AngleRightIcon /></Icon>} />}
             <time>{ timeformat.time(startTime) }</time>
             <Flex flexWrap={{ default: 'nowrap' }} spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsBaseline' }} className="spikes_count">
                 {spikes >= 10 && <ResourcesFullIcon color="var(--resource-icon-color-full)" />}
@@ -1579,6 +1580,7 @@ class MetricsHistory extends React.Component {
             isDatepickerOpened: false,
             selectedDate: null,
             packagekitExists: false,
+            isBeibootBridge: false,
             selectedVisibility: this.columns.reduce((a, v) => ({ ...a, [v[0]]: true }), {})
         };
 
@@ -1632,10 +1634,17 @@ class MetricsHistory extends React.Component {
                 .catch(ex => this.setState({ error: ex.toString() }));
     }
 
-    componentDidMount() {
-        packagekit.detect().then(exists => {
-            this.setState({ packagekitExists: exists });
-        });
+    async componentDidMount() {
+        const packagekitExists = await packagekit.detect();
+        // HACK: See https://github.com/cockpit-project/cockpit/issues/19143
+        let cmdline = "";
+        try {
+            cmdline = await cockpit.file("/proc/self/cmdline").read();
+        } catch (_ex) {}
+
+        const isBeibootBridge = cmdline?.includes("ic# cockpit-bridge");
+
+        this.setState({ packagekitExists, isBeibootBridge });
     }
 
     handleMoreData() {
@@ -1797,11 +1806,16 @@ class MetricsHistory extends React.Component {
                         action={<Button onClick={() => cockpit.logout(true)}>{_("Log out")}</Button>}
             />;
 
-        if (cockpit.manifests && !cockpit.manifests.pcp)
+        // on a single machine, cockpit-pcp depends on pcp; but this may not be the case in the beiboot scenario,
+        // so additionally check if pcp is available on the logged in target machine
+        if ((cockpit.manifests && !cockpit.manifests.pcp) || this.pmlogger_service.exists === false)
             return <EmptyStatePanel
                         icon={ExclamationCircleIcon}
                         title={_("Package cockpit-pcp is missing for metrics history")}
-                        action={this.state.packagekitExists ? <Button onClick={() => this.handleInstall()}>{_("Install cockpit-pcp")}</Button> : null}
+                        action={this.state.isBeibootBridge === true
+                            // See https://github.com/cockpit-project/cockpit/issues/19143
+                            ? <Text>{ _("Installation not supported without installed cockpit package") }</Text>
+                            : this.state.packagekitExists && <Button onClick={this.handleInstall}>{_("Install cockpit-pcp")}</Button>}
             />;
 
         if (!this.state.metricsAvailable) {

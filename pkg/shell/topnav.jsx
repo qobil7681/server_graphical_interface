@@ -123,11 +123,15 @@ export class TopNav extends React.Component {
 
         if (!this.superuser_connection || (this.superuser_connection.options.host !=
                                            this.props.machine.connection_string)) {
-            if (this.superuser_connection)
+            if (this.superuser_connection) {
                 this.superuser_connection.close();
+                this.superuser_connection = null;
+            }
 
-            this.superuser_connection = cockpit.dbus(null, { bus: "internal", host: this.props.machine.connection_string });
-            this.superuser = this.superuser_connection.proxy("cockpit.Superuser", "/superuser");
+            if (connected) {
+                this.superuser_connection = cockpit.dbus(null, { bus: "internal", host: this.props.machine.connection_string });
+                this.superuser = this.superuser_connection.proxy("cockpit.Superuser", "/superuser");
+            }
         }
 
         const item = this.props.compiled.items[this.props.state.component];
@@ -148,9 +152,12 @@ export class TopNav extends React.Component {
                 {cockpit.format(_("$0 documentation"), this.state.osRelease.NAME)}
             </DropdownItem>);
 
-        docItems.push(<DropdownItem key="cockpit-doc" href="https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/8/html/managing_systems_using_the_rhel_8_web_console/index" target="blank" rel="noopener noreferrer" icon={<ExternalLinkAltIcon />}>
-            {_("Web Console")}
-        </DropdownItem>);
+        // global documentation for cockpit as a whole
+        (cockpit.manifests.shell?.docs ?? []).forEach(doc => {
+            docItems.push(<DropdownItem key={doc.label} href={doc.url} target="blank" rel="noopener noreferrer" icon={<ExternalLinkAltIcon />}>
+                {doc.label}
+            </DropdownItem>);
+        });
 
         if (docs.length > 0)
             docItems.push(<DropdownSeparator key="separator" />);

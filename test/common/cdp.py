@@ -44,7 +44,6 @@ class Browser(abc.ABC):
         Reimplement this in subclasses, so it is easier to return None
         than to raise the proper exception (done at once in path()).
         """
-        pass
 
     def path(self, show_browser):
         """Return the path of the browser, if available.
@@ -118,21 +117,21 @@ class Firefox(Browser):
         profile = glob.glob(os.path.join(browser_home, ".mozilla/firefox/*.blank"))[0]
 
         with open(os.path.join(profile, "user.js"), "w") as f:
-            f.write("""
+            f.write(f"""
                 user_pref("remote.enabled", true);
                 user_pref("remote.frames.enabled", true);
                 user_pref("app.update.auto", false);
                 user_pref("datareporting.policy.dataSubmissionEnabled", false);
                 user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
                 user_pref("dom.disable_beforeunload", true);
-                user_pref("browser.download.dir", "{0}");
+                user_pref("browser.download.dir", "{download_dir}");
                 user_pref("browser.download.folderList", 2);
                 user_pref("signon.rememberSignons", false);
                 user_pref("dom.navigation.locationChangeRateLimit.count", 9999);
                 // HACK: https://bugzilla.mozilla.org/show_bug.cgi?id=1746154
                 user_pref("fission.webContentIsolationStrategy", 0);
                 user_pref("fission.bfcacheInParent", false);
-                """.format(download_dir))
+                """)
 
         with open(os.path.join(profile, "handlers.json"), "w") as f:
             f.write('{'
@@ -204,7 +203,7 @@ class CDP:
         cmd = "client." + cmd
         res = self.command(cmd)
         if trace:
-            if "result" in res:
+            if res and "result" in res:
                 print("<- " + repr(res["result"]))
             else:
                 print("<- " + repr(res))

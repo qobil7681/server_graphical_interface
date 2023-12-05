@@ -37,7 +37,7 @@ distdir: $(DISTFILES)
 	sed -i "s/[@]VERSION@/$(VERSION)/" "$(distdir)/src/client/org.cockpit_project.CockpitClient.metainfo.xml"
 	$(srcdir)/tools/fix-spec $(distdir)/tools/cockpit.spec $(VERSION)
 	test -z '$(HACK_SPEC_FOR_PYTHON)' || \
-		sed -i 's/\(define cockpit_enable_python\) 0/\1 1/' $(distdir)/tools/cockpit.spec
+		sed -i 's/\(define enable_old_bridge\) 1/\1 0/' $(distdir)/tools/cockpit.spec
 	sed -i "/^pkgver=/ s/0/$(VERSION)/" "$(distdir)/tools/arch/PKGBUILD"
 	sed -i "1 s/0/$(VERSION)/" "$(distdir)/tools/debian/changelog"
 	cp -r "$(srcdir)/dist" "$(distdir)"
@@ -67,7 +67,7 @@ dist-hook: $(distdir)/tools/debian/copyright
 $(distdir)/tools/debian/copyright: $(DIST_STAMP)
 	$(AM_V_GEN) NODE_ENV=$(NODE_ENV) $(srcdir)/tools/build-debian-copyright > $@
 
-DISTCHECK_CONFIGURE_FLAGS = --enable-prefix-only
+DISTCHECK_CONFIGURE_FLAGS = --enable-prefix-only $(EXTRA_DISTCHECK_CONFIGURE_FLAGS)
 
 # Validate our AppStream metadata
 distcheck-hook::

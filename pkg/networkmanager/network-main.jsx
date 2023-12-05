@@ -138,6 +138,7 @@ export const NetworkPage = ({ privileged, operationInProgress, usage_monitor, pl
 
     const actions = privileged && (
         <>
+            <NetworkAction buttonText={_("Add VPN")} type='wg' />
             <NetworkAction buttonText={_("Add bond")} type='bond' />
             <NetworkAction buttonText={_("Add team")} type='team' />
             <NetworkAction buttonText={_("Add bridge")} type='bridge' />
@@ -154,13 +155,13 @@ export const NetworkPage = ({ privileged, operationInProgress, usage_monitor, pl
                 <Gallery hasGutter>
                     {firewall.installed && <Card id="networking-firewall-summary">
                         <CardHeader actions={{
-                            actions: <><Button variant="secondary" id="networking-firewall-link"
+                            actions: <Button variant="secondary" id="networking-firewall-link"
                                         component="a"
                                         onClick={() => cockpit.jump("/network/firewall", cockpit.transport.host)}>
                                 {_("Edit rules and zones")}
-                            </Button></>,
+                            </Button>,
                         }}>
-                            <Flex alignItems={{ default: 'alignItemsCenter' }}>
+                            <Flex spaceItems={{ default: 'spaceItemsMd' }} alignItems={{ default: 'alignItemsCenter' }}>
                                 <CardTitle component="h2">{_("Firewall")}</CardTitle>
                                 <FirewallSwitch firewall={firewall} />
                             </Flex>

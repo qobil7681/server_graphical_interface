@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import array
 import asyncio
 import contextlib
 import getpass
@@ -22,13 +23,15 @@ import logging
 import os
 import socket
 from tempfile import TemporaryDirectory
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple
 
 from cockpit._vendor import ferny
 from cockpit._vendor.bei.bootloader import make_bootloader
-from cockpit._vendor.systemd_ctypes import bus
+from cockpit._vendor.systemd_ctypes import Variant, bus
 
 from .beipack import BridgeBeibootHelper
+from .jsonutil import JsonObject, get_str
+from .packages import BridgeConfig
 from .peer import ConfiguredPeer, Peer, PeerError
 from .polkit import PolkitAgent
 from .router import Router, RoutingError, RoutingRule
@@ -37,13 +40,13 @@ logger = logging.getLogger(__name__)
 
 
 class SuperuserPeer(ConfiguredPeer):
-    responder: ferny.InteractionResponder
+    responder: ferny.AskpassHandler
 
-    def __init__(self, router: Router, config: Dict[str, object], responder: ferny.InteractionResponder):
+    def __init__(self, router: Router, config: BridgeConfig, responder: ferny.AskpassHandler):
         super().__init__(router, config)
         self.responder = responder
 
-    async def do_connect_transport(self) -> asyncio.Transport:
+    async def do_connect_transport(self) -> None:
         async with contextlib.AsyncExitStack() as context:
             if 'pkexec' in self.args:
                 logger.debug('connecting polkit superuser peer transport %r', self.args)
@@ -51,7 +54,17 @@ class SuperuserPeer(ConfiguredPeer):
             else:
                 logger.debug('connecting non-polkit superuser peer transport %r', self.args)
 
-            agent = ferny.InteractionAgent(self.responder)
+            responders: 'list[ferny.InteractionHandler]' = [self.responder]
+
+            if '# cockpit-bridge' in self.args:
+                logger.debug('going to beiboot superuser bridge %r', self.args)
+                helper = BridgeBeibootHelper(self, ['--privileged'])
+                responders.append(helper)
+                stage1 = make_bootloader(helper.steps, gadgets=ferny.BEIBOOT_GADGETS).encode()
+            else:
+                stage1 = None
+
+            agent = ferny.InteractionAgent(responders)
 
             if 'SUDO_ASKPASS=ferny-askpass' in self.env:
                 tmpdir = context.enter_context(TemporaryDirectory())
@@ -62,28 +75,24 @@ class SuperuserPeer(ConfiguredPeer):
 
             transport = await self.spawn(self.args, env, stderr=agent, start_new_session=True)
 
-            if '# cockpit-bridge' in self.args:
-                logger.debug('going to beiboot superuser bridge %r', self.args)
-                helper = BridgeBeibootHelper(self, ['--privileged'])
-                agent.add_handler(helper)
-                transport.write(make_bootloader(helper.steps, gadgets=ferny.BEIBOOT_GADGETS).encode())
+            if stage1 is not None:
+                transport.write(stage1)
 
             try:
                 await agent.communicate()
             except ferny.InteractionError as exc:
                 raise PeerError('authentication-failed', message=str(exc)) from exc
 
-        return transport
 
-
-class CockpitResponder(ferny.InteractionResponder):
+class CockpitResponder(ferny.AskpassHandler):
     commands = ('ferny.askpass', 'cockpit.send-stderr')
 
     async def do_custom_command(self, command: str, args: Tuple, fds: List[int], stderr: str) -> None:
         if command == 'cockpit.send-stderr':
             with socket.socket(fileno=fds[0]) as sock:
                 fds.pop(0)
-                socket.send_fds(sock, [b'\0'], [2])
+                # socket.send_fds(sock, [b'\0'], [2])  # New in Python 3.9
+                sock.sendmsg([b'\0'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [2]))])
 
 
 class AuthorizeResponder(CockpitResponder):
@@ -96,9 +105,9 @@ class AuthorizeResponder(CockpitResponder):
 
 
 class SuperuserRoutingRule(RoutingRule, CockpitResponder, bus.Object, interface='cockpit.Superuser'):
-    superuser_configs: Dict[str, Dict[str, object]]
+    superuser_configs: Sequence[BridgeConfig] = ()
     pending_prompt: Optional[asyncio.Future]
-    peer: Optional[Peer]
+    peer: Optional[SuperuserPeer]
 
     # D-Bus signals
     prompt = bus.Interface.Signal('s', 's', 's', 'b', 's')  # message, prompt, default, echo, error
@@ -106,10 +115,10 @@ class SuperuserRoutingRule(RoutingRule, CockpitResponder, bus.Object, interface=
     # D-Bus properties
     bridges = bus.Interface.Property('as', value=[])
     current = bus.Interface.Property('s', value='none')
-    methods = bus.Interface.Property('a{sv}')
+    methods = bus.Interface.Property('a{sv}', value={})
 
     # RoutingRule
-    def apply_rule(self, options: Dict[str, object]) -> Optional[Peer]:
+    def apply_rule(self, options: JsonObject) -> Optional[Peer]:
         superuser = options.get('superuser')
 
         if not superuser or self.current == 'root':
@@ -123,7 +132,7 @@ class SuperuserRoutingRule(RoutingRule, CockpitResponder, bus.Object, interface=
             # superuser requested, but not active?  That's an error.
             raise RoutingError('access-denied')
 
-    # ferny.InteractionResponder
+    # ferny.AskpassHandler
     async def do_askpass(self, messages: str, prompt: str, hint: str) -> Optional[str]:
         assert self.pending_prompt is None
         echo = hint == "confirm"
@@ -140,9 +149,7 @@ class SuperuserRoutingRule(RoutingRule, CockpitResponder, bus.Object, interface=
     def __init__(self, router: Router, *, privileged: bool = False):
         super().__init__(router)
 
-        self.superuser_configs = {}
         self.pending_prompt = None
-        self.bridges = []
         self.peer = None
         self.startup = None
 
@@ -153,20 +160,18 @@ class SuperuserRoutingRule(RoutingRule, CockpitResponder, bus.Object, interface=
         self.current = 'none'
         self.peer = None
 
-    async def go(self, name: str, responder: ferny.InteractionResponder) -> None:
+    async def go(self, name: str, responder: ferny.AskpassHandler) -> None:
         if self.current != 'none':
             raise bus.BusError('cockpit.Superuser.Error', 'Superuser bridge already running')
-
-        if name == 'any' and self.bridges:
-            name = self.bridges[0]
 
         assert self.peer is None
         assert self.startup is None
 
-        try:
-            config = self.superuser_configs[name]
-        except KeyError as exc:
-            raise bus.BusError('cockpit.Superuser.Error', f'Unknown superuser bridge type "{name}"') from exc
+        for config in self.superuser_configs:
+            if name in (config.name, 'any'):
+                break
+        else:
+            raise bus.BusError('cockpit.Superuser.Error', f'Unknown superuser bridge type "{name}"')
 
         self.current = 'init'
         self.peer = SuperuserPeer(self.router, config, responder)
@@ -179,30 +184,22 @@ class SuperuserRoutingRule(RoutingRule, CockpitResponder, bus.Object, interface=
         except (OSError, PeerError) as exc:
             raise bus.BusError('cockpit.Superuser.Error', str(exc)) from exc
 
-        self.current = name
+        self.current = self.peer.config.name
 
-    def set_configs(self, configs: List[Dict[str, object]]):
+    def set_configs(self, configs: Sequence[BridgeConfig]):
         logger.debug("set_configs() with %d items", len(configs))
-        self.superuser_configs = {}
-        for config in configs:
-            if config.get('privileged', False):
-                spawn = config['spawn']
-                assert isinstance(spawn, list)
-                assert isinstance(spawn[0], str)
-                label = config.get('label')
-                if label is not None:
-                    assert isinstance(label, str)
-                    name = label
-                else:
-                    name = os.path.basename(spawn[0])
-                self.superuser_configs[name] = config
-        self.bridges = list(self.superuser_configs)
+        configs = [config for config in configs if config.privileged]
+        self.superuser_configs = tuple(configs)
+        self.bridges = [config.name for config in self.superuser_configs]
+        self.methods = {c.label: Variant({'label': Variant(c.label)}, 'a{sv}') for c in configs if c.label}
 
         logger.debug("  bridges are now %s", self.bridges)
 
-        # If the currently-active bridge got removed...
-        if self.peer is not None and self.current not in self.superuser_configs:
-            self.stop()
+        # If the currently active bridge config is not in the new set of configs, stop it
+        if self.peer is not None:
+            if self.peer.config not in self.superuser_configs:
+                logger.debug("  stopping superuser bridge '%s': it disappeared from configs", self.peer.config.name)
+                self.stop()
 
     def cancel_prompt(self):
         if self.pending_prompt is not None:
@@ -219,14 +216,13 @@ class SuperuserRoutingRule(RoutingRule, CockpitResponder, bus.Object, interface=
         assert self.peer is None
 
     # Connect-on-startup functionality
-    def init(self, params: Dict[str, Union[bool, str, Sequence[str]]]) -> None:
-        name = params.get('id', 'any')
-        assert isinstance(name, str)
+    def init(self, params: JsonObject) -> None:
+        name = get_str(params, 'id', 'any')
         responder = AuthorizeResponder(self.router)
         self._init_task = asyncio.create_task(self.go(name, responder))
         self._init_task.add_done_callback(self._init_done)
 
-    def _init_done(self, task):
+    def _init_done(self, task: 'asyncio.Task[None]') -> None:
         logger.debug('superuser init done! %s', task.exception())
         self.router.write_control(command='superuser-init-done')
         del self._init_task
@@ -247,12 +243,3 @@ class SuperuserRoutingRule(RoutingRule, CockpitResponder, bus.Object, interface=
             self.pending_prompt.set_result(reply)
         else:
             logger.debug('got Answer, but no prompt pending')
-
-    @methods.getter
-    def get_methods(self):
-        methods = {}
-        for name, config in self.superuser_configs.items():
-            label = config.get('label')
-            if label:
-                methods[name] = {'t': 'a{sv}', 'v': {'label': {'t': 's', 'v': label}}}
-        return methods

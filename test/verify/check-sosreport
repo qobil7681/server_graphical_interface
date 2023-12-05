@@ -55,11 +55,7 @@ only-plugins=release,date,host,cgroups,networking
         if urlroot == "":
             b.assert_pixels("#app", "limited")
 
-        b.click("#app button:contains(Turn on administrative access)")
-        b.wait_in_text(".pf-v5-c-modal-box:contains('Switch to administrative access')", "Password for admin:")
-        b.set_input_text(".pf-v5-c-modal-box:contains('Switch to administrative access') input", "foobar")
-        b.click(".pf-v5-c-modal-box button:contains('Authenticate')")
-        b.wait_not_present(".pf-v5-c-modal-box:contains('Switch to administrative access')")
+        b.become_superuser()
 
         b.wait_in_text("#app", "No system reports.")
         if urlroot == "":
@@ -107,7 +103,21 @@ only-plugins=release,date,host,cgroups,networking
         b.click("#sos-remove-dialog button:contains(Delete)")
         testlib.wait(lambda: m.execute(f"! test -f /var/tmp/{base_report_gpg} && echo yes"))
 
+        # error reporting
+        self.write_file("/usr/sbin/sos", """#!/bin/sh
+echo "EssOhEss is kaputt" >&2
+exit 1""", perm="755")
+        b.click("button:contains('Run report')")
+        b.wait_visible("#sos-dialog")
+        b.click("#sos-dialog button:contains(Run report)")
+        b.wait_in_text("#sos-dialog .pf-v5-c-alert",
+                       "sos report failed" if self.is_pybridge() else "sos exited with code 1")
+        b.wait_in_text("#sos-dialog .pf-v5-c-alert", "EssOhEss is kaputt")
+        b.click("#sos-dialog button:contains(Cancel)")
+        b.wait_not_present("#sos-dialog")
+
         self.allow_journal_messages('.*comm="sosreport".*')
+        self.allow_browser_errors('error: Failed to call sos report: {"problem":null,"exit_status":1,"exit_signal":null')
 
     def testWithUrlRoot(self):
         self.testBasic(urlroot="/webcon")

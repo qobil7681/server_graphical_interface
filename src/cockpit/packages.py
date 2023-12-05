@@ -15,10 +15,11 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-
 import collections
+import contextlib
+import functools
 import gzip
-import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -26,60 +27,120 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Callable, ClassVar, Dict, List, Optional, Pattern, Tuple
+from typing import (
+    BinaryIO,
+    Callable,
+    ClassVar,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    Pattern,
+    Sequence,
+    Tuple,
+    TypeVar,
+)
 
 from cockpit._vendor.systemd_ctypes import bus
 
 from . import config
+from ._version import __version__
+from .jsonutil import (
+    JsonDocument,
+    JsonError,
+    JsonObject,
+    get_bool,
+    get_dict,
+    get_int,
+    get_objv,
+    get_str,
+    get_strv,
+    typechecked,
+)
 
-VERSION = '300'
 logger = logging.getLogger(__name__)
 
 
-# An entity to serve is a set of bytes plus a content-type/content-encoding pair
-Entity = Tuple[bytes, Tuple[Optional[str], Optional[str]]]
-Entities = Dict[str, Entity]
+# In practice, this is going to get called over and over again with exactly the
+# same list.  Let's try to cache the result.
+@functools.lru_cache()
+def parse_accept_language(accept_language: str) -> Sequence[str]:
+    """Parse the Accept-Language header, if it exists.
+
+    Returns an ordered list of languages, with fallbacks inserted, and
+    truncated to the position where 'en' would have otherwise appeared, if
+    applicable.
+
+    https://tools.ietf.org/html/rfc7231#section-5.3.5
+    https://datatracker.ietf.org/doc/html/rfc4647#section-3.4
+    """
+
+    logger.debug('parse_accept_language(%r)', accept_language)
+    locales_with_q = []
+    for entry in accept_language.split(','):
+        entry = entry.strip().lower()
+        logger.debug('  entry %r', entry)
+        locale, _, qstr = entry.partition(';q=')
+        try:
+            q = float(qstr or 1.0)
+        except ValueError:
+            continue  # ignore malformed entry
+
+        while locale:
+            logger.debug('    adding %r q=%r', locale, q)
+            locales_with_q.append((locale, q))
+            # strip off '-detail' suffixes until there's nothing left
+            locale, _, _region = locale.rpartition('-')
+
+    # Sort the list by highest q value.  Otherwise, this is a stable sort.
+    locales_with_q.sort(key=lambda pair: pair[1], reverse=True)
+    logger.debug('  sorted list is %r', locales_with_q)
+
+    # If we have 'en' anywhere in our list, ignore it and all items after it.
+    # This will result in us getting an untranslated (ie: English) version if
+    # none of the more-preferred languages are found, which is what we want.
+    # We also take the chance to drop duplicate items.  Note: both of these
+    # things need to happen after sorting.
+    results = []
+    for locale, _q in locales_with_q:
+        if locale == 'en':
+            break
+        if locale not in results:
+            results.append(locale)
+
+    logger.debug('  results list is %r', results)
+    return tuple(results)
 
 
-# Sorting is important because the checksums are dependent on the order we
-# visit these.  This is not the same as sorting on the full pathname, since
-# each directory component is considered separately.  We could split the path
-# and sort on that, but it ends up not being particularly elegant.
-# Changing the approach here will change the checksum.
-# We're allowed to change it as we wish, but let's try to match behaviour with
-# cockpitpackages.c for the time being, since the unit tests depend on it.
-def directory_items(path):
-    return sorted(path.iterdir(), key=lambda item: item.name)
+def sortify_version(version: str) -> str:
+    """Convert a version string to a form that can be compared"""
+    # 0-pad each numeric component.  Only supports numeric versions like 1.2.3.
+    return '.'.join(part.zfill(8) for part in version.split('.'))
 
 
-# HACK: We eventually want to get rid of all ${libexecdir} in manifests:
-# - rewrite cockpit-{ssh,pcp} in Python and import them as module instead of exec'ing
-# - rewrite cockpit-askpass in Python and write it into a temporary file
-# - bundle helper shell scripts
-# Until then, we need this libexecdir detection hack.
-LIBEXECDIR = None
-
-
+@functools.lru_cache()
 def get_libexecdir() -> str:
     """Detect libexecdir on current machine
 
     This only works for systems which have cockpit-ws installed.
     """
-    global LIBEXECDIR
-    if LIBEXECDIR is None:
-        for candidate in ['/usr/local/libexec', '/usr/libexec', '/usr/local/lib/cockpit', '/usr/lib/cockpit']:
-            if os.path.exists(os.path.join(candidate, 'cockpit-askpass')):
-                LIBEXECDIR = candidate
-                break
-        else:
-            logger.warning('Could not detect libexecdir')
-            # give readable error messages
-            LIBEXECDIR = '/nonexistent/libexec'
-
-    return LIBEXECDIR
+    for candidate in ['/usr/local/libexec', '/usr/libexec', '/usr/local/lib/cockpit', '/usr/lib/cockpit']:
+        if os.path.exists(os.path.join(candidate, 'cockpit-askpass')):
+            return candidate
+    else:
+        logger.warning('Could not detect libexecdir')
+        # give readable error messages
+        return '/nonexistent/libexec'
 
 
-def patch_libexecdir(obj):
+# HACK: Type narrowing over Union types is not supported in the general case,
+# but this works for the case we care about: knowing that when we pass in an
+# JsonObject, we'll get an JsonObject back.
+J = TypeVar('J', JsonObject, JsonDocument)
+
+
+def patch_libexecdir(obj: J) -> J:
     if isinstance(obj, str):
         if '${libexecdir}/cockpit-askpass' in obj:
             # extra-special case: we handle this internally
@@ -95,113 +156,203 @@ def patch_libexecdir(obj):
         return obj
 
 
-def parse_accept_language(headers: Dict[str, object]) -> List[str]:
-    """Parse the Accept-Language header, if it exists.
-
-    Returns an ordered list of languages.
-
-    https://tools.ietf.org/html/rfc7231#section-5.3.5
-    """
-
-    accept_language = headers.get('Accept-Language')
-    if not isinstance(accept_language, str):
-        return []
-
-    accept_languages = accept_language.split(',')
-    locales = []
-    for language in accept_languages:
-        language = language.strip()
-        locale, _, weightstr = language.partition(';q=')
-        weight = float(weightstr or 1)
-
-        # Skip possible empty locales
-        if not locale:
-            continue
-
-        # Locales are case-insensitive and we store our list in lowercase
-        locales.append((locale.lower(), weight))
-
-    return [locale for locale, _ in sorted(locales, key=lambda k: k[1], reverse=True)]
-
-
-def find_translation(translations: Entities, locales: List[str]) -> Entity:
-    # First check the locales that the user sent
-    for locale in locales:
-        translation = translations.get(locale)
-        if translation is not None:
-            return translation
-
-    # Next, check the language-only versions of variant-specified locales
-    for locale in locales:
-        language, _, region = locale.partition('-')
-        if not region:
-            continue
-        translation = translations.get(language)
-        if translation:
-            return translation
-
-    # If nothing else worked, we always have English
-    return translations['en']
+# A document is a binary stream with a Content-Type, optional Content-Encoding,
+# and optional Content-Security-Policy
+class Document(NamedTuple):
+    data: BinaryIO
+    content_type: str
+    content_encoding: Optional[str] = None
+    content_security_policy: Optional[str] = None
 
 
 class PackagesListener:
-    def packages_loaded(self):
+    def packages_loaded(self) -> None:
         """Called when the packages have been reloaded"""
 
 
+class BridgeConfig(JsonObject):
+    def __init__(self, value: JsonObject):
+        super().__init__(value)
+
+        self.label = get_str(self, 'label', None)
+
+        self.privileged = get_bool(self, 'privileged', default=False)
+        self.match: JsonObject = get_dict(self, 'match', {})
+        if not self.privileged and not self.match:
+            raise JsonError(value, 'must have match rules or be privileged')
+
+        self.environ = get_strv(self, 'environ', ())
+        self.spawn = get_strv(self, 'spawn')
+        if not self.spawn:
+            raise JsonError(value, 'spawn vector must be non-empty')
+
+        self.name = self.label or self.spawn[0]
+
+
+class Condition:
+    def __init__(self, value: JsonObject):
+        try:
+            (self.name, self.value), = value.items()
+        except ValueError as exc:
+            raise JsonError(value, 'must contain exactly one key/value pair') from exc
+
+
+class Manifest(JsonObject):
+    # Skip version check when running out of the git checkout (__version__ is None)
+    COCKPIT_VERSION = __version__ and sortify_version(__version__)
+
+    def __init__(self, path: Path, value: JsonObject):
+        super().__init__(value)
+        self.path = path
+        self.name = get_str(self, 'name', self.path.name)
+        self.bridges = get_objv(self, 'bridges', BridgeConfig)
+        self.priority = get_int(self, 'priority', 1)
+        self.csp = get_str(self, 'content-security-policy', '')
+        self.conditions = get_objv(self, 'conditions', Condition)
+
+        # Skip version check when running out of the git checkout (COCKPIT_VERSION is None)
+        if self.COCKPIT_VERSION is not None:
+            requires: JsonObject = get_dict(self, 'requires', {})
+            for name, version in requires.items():
+                if name != 'cockpit':
+                    raise JsonError(name, 'non-cockpit requirement listed')
+                if sortify_version(typechecked(version, str)) > self.COCKPIT_VERSION:
+                    raise JsonError(version, f'required cockpit version ({version}) not met')
+
+
 class Package:
+    # For po{,.manifest}.js files, the interesting part is the locale name
+    PO_JS_RE: ClassVar[Pattern] = re.compile(r'(po|po\.manifest)\.([^.]+)\.js(\.gz)?')
+
+    # immutable after __init__
+    manifest: Manifest
+    name: str
+    path: Path
+    priority: int
+
+    # computed later
+    translations: Optional[Dict[str, Dict[str, str]]] = None
+    files: Optional[Dict[str, str]] = None
+
+    def __init__(self, manifest: Manifest):
+        self.manifest = manifest
+        self.name = manifest.name
+        self.path = manifest.path
+        self.priority = manifest.priority
+
+    def ensure_scanned(self) -> None:
+        """Ensure that the package has been scanned.
+
+        This allows us to defer scanning the files of the package until we know
+        that we'll actually use it.
+        """
+
+        if self.files is not None:
+            return
+
+        self.files = {}
+        self.translations = {'po.js': {}, 'po.manifest.js': {}}
+
+        for file in self.path.rglob('*'):
+            name = str(file.relative_to(self.path))
+            if name in ['.', '..', 'manifest.json']:
+                continue
+
+            po_match = Package.PO_JS_RE.fullmatch(name)
+            if po_match:
+                basename = po_match.group(1)
+                locale = po_match.group(2)
+                # Accept-Language is case-insensitive and uses '-' to separate variants
+                lower_locale = locale.lower().replace('_', '-')
+
+                self.translations[f'{basename}.js'][lower_locale] = name
+            else:
+                basename = name[:-3] if name.endswith('.gz') else name
+                self.files[basename] = name
+
+        # support old cockpit-po-plugin which didn't write po.manifest.??.js
+        if not self.translations['po.manifest.js']:
+            self.translations['po.manifest.js'] = self.translations['po.js']
+
+    def get_content_security_policy(self) -> str:
+        policy = {
+            "default-src": "'self'",
+            "connect-src": "'self'",
+            "form-action": "'self'",
+            "base-uri": "'self'",
+            "object-src": "'none'",
+            "font-src": "'self' data:",
+            "img-src": "'self' data:",
+        }
+
+        for item in self.manifest.csp.split(';'):
+            item = item.strip()
+            if item:
+                key, _, value = item.strip().partition(' ')
+                policy[key] = value
+
+        return ' '.join(f'{k} {v};' for k, v in policy.items()) + ' block-all-mixed-content'
+
+    def load_file(self, filename: str) -> Document:
+        content_type, content_encoding = mimetypes.guess_type(filename)
+        content_security_policy = None
+
+        if content_type is None:
+            content_type = 'text/plain'
+        elif content_type.startswith('text/html'):
+            content_security_policy = self.get_content_security_policy()
+
+        path = self.path / filename
+        logger.debug('  loading data from %s', path)
+
+        return Document(path.open('rb'), content_type, content_encoding, content_security_policy)
+
+    def load_translation(self, path: str, locales: Sequence[str]) -> Document:
+        self.ensure_scanned()
+        assert self.translations is not None
+
+        # First match wins
+        for locale in locales:
+            with contextlib.suppress(KeyError):
+                return self.load_file(self.translations[path][locale])
+
+        # We prefer to return an empty document than 404 in order to avoid
+        # errors in the console when a translation can't be found
+        return Document(io.BytesIO(), 'text/javascript')
+
+    def load_path(self, path: str, headers: JsonObject) -> Document:
+        self.ensure_scanned()
+        assert self.files is not None
+        assert self.translations is not None
+
+        if path in self.translations:
+            locales = parse_accept_language(get_str(headers, 'Accept-Language', ''))
+            return self.load_translation(path, locales)
+        else:
+            return self.load_file(self.files[path])
+
+
+class PackagesLoader:
     CONDITIONS: ClassVar[Dict[str, Callable[[str], bool]]] = {
         'path-exists': os.path.exists,
         'path-not-exists': lambda p: not os.path.exists(p),
     }
 
-    # For po.js files, the interesting part is the locale name
-    PO_JS_RE: ClassVar[Pattern] = re.compile(r'po\.([^.]+)\.js(\.gz)?')
-
-    # A built in base set of "English" translations
-    PO_EN_JS: ClassVar[Entity] = (b'', mimetypes.guess_type('po.js'))
-    BASE_TRANSLATIONS: ClassVar[Entities] = {'en': PO_EN_JS, 'en-us': PO_EN_JS}
-
-    files: Entities
-    translations: Entities
-
-    def __init__(self, path):
-        self.path = path
-
-        with (self.path / 'manifest.json').open(encoding='utf-8') as manifest_file:
-            self.manifest = json.load(manifest_file)
-
-        self.try_override(self.path / 'override.json')
-        self.try_override(config.lookup_config(f'{path.name}.override.json'))
-        self.try_override(config.DOT_CONFIG_COCKPIT / f'{path.name}.override.json')
-
-        # HACK: drop this after getting rid of ${libexecdir}, see above
-        self.manifest = patch_libexecdir(self.manifest)
-
-        self.name = self.manifest.get('name', path.name)
-        self.priority = self.manifest.get('priority', 1)
-        self.bridges = self.manifest.get('bridges', [])
-
-        self.files = {}
-        self.translations = dict(Package.BASE_TRANSLATIONS)
-
-        self.version = Package.sortify_version(VERSION)
-
-    def try_override(self, path: Path) -> None:
+    @classmethod
+    def get_xdg_data_dirs(cls) -> Iterable[str]:
         try:
-            with path.open(encoding='utf-8') as override_file:
-                override = json.load(override_file)
-            self.manifest = self.merge_patch(self.manifest, override)
-        except FileNotFoundError:
-            # This is the expected usual case
-            pass
-        except json.JSONDecodeError as exc:
-            # User input error: report a warning
-            logger.warning('%s: %s', path, exc)
+            yield os.environ['XDG_DATA_HOME']
+        except KeyError:
+            yield os.path.expanduser('~/.local/share')
+
+        try:
+            yield from os.environ['XDG_DATA_DIRS'].split(':')
+        except KeyError:
+            yield from ('/usr/local/share', '/usr/share')
 
     # https://www.rfc-editor.org/rfc/rfc7386
-    @staticmethod
-    def merge_patch(target: object, patch: object) -> object:
+    @classmethod
+    def merge_patch(cls, target: JsonDocument, patch: J) -> J:
         # Loosely based on example code from the RFC
         if not isinstance(patch, dict):
             return patch
@@ -210,147 +361,118 @@ class Package:
         result = dict(target if isinstance(target, dict) else {})
         for name, value in patch.items():
             if value is not None:
-                result[name] = Package.merge_patch(result.get(name), value)
+                result[name] = cls.merge_patch(result.get(name), value)
             else:
                 result.pop(name)
         return result
 
-    @staticmethod
-    def sortify_version(version: str) -> str:
-        """Convert a version string to a form that can be compared"""
-        # 0-pad each numeric component.  Only supports numeric versions like 1.2.3.
-        return '.'.join(part.zfill(8) for part in version.split('.'))
+    @classmethod
+    def patch_manifest(cls, manifest: JsonObject, parent: Path) -> JsonObject:
+        override_files = [
+            parent / 'override.json',
+            config.lookup_config(f'{parent.name}.override.json'),
+            config.DOT_CONFIG_COCKPIT / f'{parent.name}.override.json',
+        ]
 
-    def add_file(self, item: Path, checksums: List['hashlib._Hash']) -> None:
-        rel = str(item.relative_to(self.path))
-        guessed_type = mimetypes.guess_type(rel)
-
-        with item.open('rb') as file:
-            data = file.read()
-
-        # Keep the file in memory to serve it later: if this is a 'po.*.js'
-        # file then add it to the list of translations, by locale name.
-        # Otherwise, add it to the normal files list (after stripping '.gz').
-        po_match = Package.PO_JS_RE.fullmatch(rel)
-        if po_match:
-            locale = po_match.group(1)
-            # Accept-Language is case-insensitive and uses '-' to separate variants
-            lower_locale = locale.lower().replace('_', '-')
-            self.translations[lower_locale] = data, guessed_type
-        else:
-            basename = rel[:-3] if rel.endswith('.gz') else rel
-            self.files[basename] = data, guessed_type
-
-        # Perform checksum calculation
-        sha = hashlib.sha256(data).hexdigest()
-        for context in checksums:
-            context.update(f'{rel}\0{sha}\0'.encode('ascii'))
-
-    def walk(self, checksums, path):
-        for item in directory_items(path):
-            if item.is_dir():
-                self.walk(checksums, item)
-            elif item.is_file():
-                self.add_file(item, checksums)
-
-    def check(self, at_least_prio):
-        if 'requires' in self.manifest:
-            requires = self.manifest['requires']
-            if any(package != 'cockpit' for package in requires):
-                return False
-
-            if 'cockpit' in requires and self.version < Package.sortify_version(requires['cockpit']):
-                return False
-
-        if at_least_prio is not None:
-            if 'priority' not in self.manifest:
-                return False
-
-            if self.manifest['priority'] <= at_least_prio:
-                return False
-
-        for condition in self.manifest.get('conditions', []):
+        for override_file in override_files:
             try:
-                (predicate, value), = condition.items()
-            except (AttributeError, ValueError):
-                # ignore manifests with broken syntax
-                logger.warning('invalid condition in %s: %s', self.path, condition)
-                return False
+                override: JsonDocument = json.loads(override_file.read_bytes())
+            except FileNotFoundError:
+                continue
+            except json.JSONDecodeError as exc:
+                # User input error: report a warning
+                logger.warning('%s: %s', override_file, exc)
 
-            try:
-                test_fn = Package.CONDITIONS[predicate]
-            except KeyError:
-                # do *not* ignore manifests with unknown predicates, for forward compatibility
-                logger.warning('ignoring unknown predicate in %s: %s', self.path, predicate)
+            if not isinstance(override, dict):
+                logger.warning('%s: override file is not a dictionary', override_file)
                 continue
 
-            if not test_fn(value):
-                logger.info('Hiding package %s as its %s condition is not met', self.path, condition)
+            manifest = cls.merge_patch(manifest, override)
+
+        return patch_libexecdir(manifest)
+
+    @classmethod
+    def load_manifests(cls) -> Iterable[Manifest]:
+        for datadir in cls.get_xdg_data_dirs():
+            logger.debug("Scanning for manifest files under %s", datadir)
+            for file in Path(datadir).glob('cockpit/*/manifest.json'):
+                logger.debug("Considering file %s", file)
+                try:
+                    manifest = json.loads(file.read_text())
+                except json.JSONDecodeError as exc:
+                    logger.error("%s: %s", file, exc)
+                    continue
+                if not isinstance(manifest, dict):
+                    logger.error("%s: json document isn't an object", file)
+                    continue
+
+                parent = file.parent
+                manifest = cls.patch_manifest(manifest, parent)
+                try:
+                    yield Manifest(parent, manifest)
+                except JsonError as exc:
+                    logger.warning('%s %s', file, exc)
+
+    def check_condition(self, condition: str, value: object) -> bool:
+        check_fn = self.CONDITIONS[condition]
+
+        # All known predicates currently only work on strings
+        if not isinstance(value, str):
+            return False
+
+        return check_fn(value)
+
+    def check_conditions(self, manifest: Manifest) -> bool:
+        for condition in manifest.conditions:
+            try:
+                okay = self.check_condition(condition.name, condition.value)
+            except KeyError:
+                # do *not* ignore manifests with unknown predicates, for forward compatibility
+                logger.warning('  %s: ignoring unknown predicate in manifest: %s', manifest.path, condition.name)
+                continue
+
+            if not okay:
+                logger.debug('  hiding package %s as its %s condition is not met', manifest.path, condition)
                 return False
 
         return True
 
-    def get_content_security_policy(self, origin):
-        assert origin.startswith('http')
-        origin_ws = origin.replace('http', 'ws', 1)
+    def load_packages(self) -> Iterable[Tuple[str, Package]]:
+        logger.debug('Scanning for available package manifests:')
+        # Sort all available packages into buckets by to their claimed name
+        names: Dict[str, List[Manifest]] = collections.defaultdict(list)
+        for manifest in self.load_manifests():
+            logger.debug('  %s/manifest.json', manifest.path)
+            names[manifest.name].append(manifest)
+        logger.debug('done.')
 
-        # fix me: unit tests depend on the specific order
-        policy = collections.OrderedDict({
-            "default-src": f"'self' {origin}",
-            "connect-src": f"'self' {origin} {origin_ws}",
-            "form-action": f"'self' {origin}",
-            "base-uri": f"'self' {origin}",
-            "object-src": "'none'",
-            "font-src": f"'self' {origin} data:",
-            "img-src": f"'self' {origin} data:",
-        })
+        logger.debug('Selecting packages to serve:')
+        for name, candidates in names.items():
+            # For each package name, iterate the candidates in descending
+            # priority order and select the first one which passes all checks
+            for candidate in sorted(candidates, key=lambda manifest: manifest.priority, reverse=True):
+                try:
+                    if self.check_conditions(candidate):
+                        logger.debug('  creating package %s -> %s', name, candidate.path)
+                        yield name, Package(candidate)
+                        break
+                except JsonError:
+                    logger.warning('  %s: ignoring package with invalid manifest file', candidate.path)
 
-        manifest_policy = self.manifest.get('content-security-policy', '')
-        for item in manifest_policy.split(';'):
-            item = item.strip()
-            if item:
-                key, _, value = item.strip().partition(' ')
-                policy[key] = value
+                logger.debug('  ignoring %s: unmet conditions', candidate.path)
+        logger.debug('done.')
 
-        return ' '.join(f'{k} {v};' for k, v in policy.items()) + ' block-all-mixed-content'
-
-    def serve_file(self, path, channel):
-        if path == 'po.js':
-            # We do locale-dependent lookup only for /po.js.  This always succeeds.
-            locales = parse_accept_language(channel.headers)
-            data, (content_type, encoding) = find_translation(self.translations, locales)
-        else:
-            # Otherwise, just look up the file based on its path.  May raise KeyError.
-            data, (content_type, encoding) = self.files[path]
-
-        headers = {
-            "Access-Control-Allow-Origin": channel.origin,
-            "Content-Encoding": encoding,
-        }
-        if content_type is not None and content_type.startswith('text/html'):
-            headers['Content-Security-Policy'] = self.get_content_security_policy(channel.origin)
-
-        channel.http_ok(content_type, headers)
-        channel.send_data(data)
-
-
-# TODO: This doesn't yet implement the slighty complicated checksum
-# scheme of the C bridge (see cockpitpackages.c) to support caching
-# and reloading.
 
 class Packages(bus.Object, interface='cockpit.Packages'):
-    manifests = bus.Interface.Property('s', value="{}")
-
+    loader: PackagesLoader
     listener: Optional[PackagesListener]
     packages: Dict[str, Package]
-    checksum: str = ''
+    saw_first_reload_hint: bool
 
-    def __init__(self, listener: Optional[PackagesListener] = None):
-        super().__init__()
-
+    def __init__(self, listener: Optional[PackagesListener] = None, loader: Optional[PackagesLoader] = None):
         self.listener = listener
-        self.packages = {}
-        self.load_packages()
+        self.loader = loader or PackagesLoader()
+        self.load()
 
         # Reloading the Shell in the browser should reload the
         # packages.  This is implemented by having the Shell call
@@ -360,73 +482,60 @@ class Packages(bus.Object, interface='cockpit.Packages'):
         #
         self.saw_first_reload_hint = False
 
+    def load(self) -> None:
+        self.packages = dict(self.loader.load_packages())
+        self.manifests = json.dumps({name: dict(package.manifest) for name, package in self.packages.items()})
+        logger.debug('Packages loaded: %s', list(self.packages))
+
     def show(self):
         for name in sorted(self.packages):
             package = self.packages[name]
             menuitems = ''
             print(f'{name:20} {menuitems:40} {package.path}')
-        if self.checksum:
-            print(f'checksum = {self.checksum}')
 
-    def try_packages_dir(self, path, checksums):
-        try:
-            items = directory_items(path)
-        except FileNotFoundError:
-            return
+    def get_bridge_configs(self) -> Sequence[BridgeConfig]:
+        def yield_configs():
+            for package in sorted(self.packages.values(), key=lambda package: -package.priority):
+                yield from package.manifest.bridges
+        return tuple(yield_configs())
 
-        for item in items:
-            if item.is_dir():
-                try:
-                    package = Package(item)
-                except (FileNotFoundError, json.JSONDecodeError):
-                    # ignore packages with broken/empty manifests
-                    continue
+    # D-Bus Interface
+    manifests = bus.Interface.Property('s', value="{}")
 
-                if package.name in self.packages:
-                    at_least_prio = self.packages[package.name].priority
-                else:
-                    at_least_prio = None
+    @bus.Interface.Method()
+    def reload(self):
+        self.load()
+        if self.listener is not None:
+            self.listener.packages_loaded()
 
-                if package.check(at_least_prio):
-                    self.packages[package.name] = package
-                    package.walk(checksums, package.path)
+    @bus.Interface.Method()
+    def reload_hint(self):
+        if self.saw_first_reload_hint:
+            self.reload()
+        self.saw_first_reload_hint = True
 
-    def load_packages(self):
-        checksums = []
+    def load_manifests_js(self, headers: JsonObject) -> Document:
+        logger.debug('Serving /manifests.js')
 
-        xdg_data_home = os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share')
-        self.try_packages_dir(Path(xdg_data_home) / 'cockpit', checksums)
-
-        # we only checksum the system content if there's no user content
-        if not self.packages:
-            checksums.append(hashlib.sha256())
-
-        xdg_data_dirs = os.environ.get('XDG_DATA_DIRS', '/usr/local/share:/usr/share')
-        for xdg_dir in xdg_data_dirs.split(':'):
-            self.try_packages_dir(Path(xdg_dir) / 'cockpit', checksums)
-
-        if checksums:
-            self.checksum = checksums[0].hexdigest()
-        else:
-            self.checksum = None
-
-        self.manifests = json.dumps({name: package.manifest for name, package in self.packages.items()})
-
-    def serve_manifests_js(self, channel):
-        channel.http_ok('text/javascript')
+        chunks: List[bytes] = []
 
         # Send the translations required for the manifest files, from each package
-        locales = parse_accept_language(channel.headers)
+        locales = parse_accept_language(get_str(headers, 'Accept-Language', ''))
         for name, package in self.packages.items():
             if name in ['static', 'base1']:
                 continue
-            # find_translation will always find at least 'en'
-            data, (content_type, encoding) = find_translation(package.translations, locales)
-            if encoding == 'gzip':
-                data = gzip.decompress(data)
-            channel.send_data(data)
 
-        channel.send_data(("""
+            # find_translation will always find at least 'en'
+            translation = package.load_translation('po.manifest.js', locales)
+            with translation.data:
+                if translation.content_encoding == 'gzip':
+                    data = gzip.decompress(translation.data.read())
+                else:
+                    data = translation.data.read()
+
+            chunks.append(data)
+
+        chunks.append(b"""
             (function (root, data) {
                 if (typeof define === 'function' && define.amd) {
                     define(data);
@@ -437,60 +546,33 @@ class Packages(bus.Object, interface='cockpit.Packages'):
                 } else {
                     root.manifests = data;
                 }
-            }(this, """ + self.manifests + """))""").encode('ascii'))
+            }(this, """ + self.manifests.encode() + b"""))""")
 
-    def serve_manifests_json(self, channel):
-        channel.http_ok('application/json')
-        channel.send_data(self.manifests.encode('ascii'))
+        return Document(io.BytesIO(b'\n'.join(chunks)), 'text/javascript')
 
-    def serve_package_file(self, path, channel):
-        package, _, package_path = path[1:].partition('/')
-        try:
-            self.packages[package].serve_file(package_path, channel)
-        except KeyError:
-            channel.http_error(404, "Not Found")
+    def load_manifests_json(self) -> Document:
+        logger.debug('Serving /manifests.json')
+        return Document(io.BytesIO(self.manifests.encode()), 'application/json')
 
-    def serve_checksum(self, channel):
-        channel.http_ok('text/plain')
-        channel.send_data(self.checksum.encode('ascii'))
+    PATH_RE = re.compile(
+        r'/'                   # leading '/'
+        r'(?:([^/]+)/)?'       # optional leading path component
+        r'((?:[^/]+/)*[^/]+)'  # remaining path components
+    )
 
-    def serve_file(self, path, channel):
-        assert path[0] == '/'
+    def load_path(self, path: str, headers: JsonObject) -> Document:
+        logger.debug('packages: serving %s', path)
 
-        # HACK: If the response is language specific, don't cache the file. Caching "po.js" breaks
-        # changing the language in Chromium, as that does not respect `Vary: Cookie` properly.
-        # See https://github.com/cockpit-project/cockpit/issues/8160
-        # We also can't cache /manifests.js because it changes if packages are installed/removed.
-        locale_specific = path.endswith('po.js') or path in ['/manifests.js', '/manifests.json']
-        if self.checksum is not None and not locale_specific:
-            channel.push_header('X-Cockpit-Pkg-Checksum', self.checksum)
+        match = self.PATH_RE.fullmatch(path)
+        if match is None:
+            raise ValueError(f'Invalid HTTP path {path}')
+        packagename, filename = match.groups()
+
+        if packagename is not None:
+            return self.packages[packagename].load_path(filename, headers)
+        elif filename == 'manifests.js':
+            return self.load_manifests_js(headers)
+        elif filename == 'manifests.json':
+            return self.load_manifests_json()
         else:
-            channel.push_header('Cache-Control', 'no-cache, no-store')
-
-        if path == '/manifests.js':
-            self.serve_manifests_js(channel)
-        elif path == '/manifests.json':
-            self.serve_manifests_json(channel)
-        elif path == '/checksum':
-            self.serve_checksum(channel)
-        else:
-            self.serve_package_file(path, channel)
-
-    def get_bridge_configs(self):
-        bridges = []
-        for package in sorted(self.packages.values(), key=lambda package: -package.priority):
-            bridges.extend(package.bridges)
-        return bridges
-
-    @bus.Interface.Method()
-    def reload(self):
-        self.packages = {}
-        self.load_packages()
-        if self.listener is not None:
-            self.listener.packages_loaded()
-
-    @bus.Interface.Method()
-    def reload_hint(self):
-        if self.saw_first_reload_hint:
-            self.reload()
-        self.saw_first_reload_hint = True
+            raise KeyError

@@ -18,8 +18,10 @@
 import asyncio
 import logging
 import os
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
+from .jsonutil import JsonDocument, JsonObject
+from .packages import BridgeConfig
 from .protocol import CockpitProblem, CockpitProtocol, CockpitProtocolError
 from .router import Endpoint, Router, RoutingRule
 from .transports import SubprocessProtocol, SubprocessTransport
@@ -50,7 +52,7 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
         self.done_callbacks = []
 
     # Initialization
-    async def do_connect_transport(self) -> asyncio.Transport:
+    async def do_connect_transport(self) -> None:
         raise NotImplementedError
 
     async def spawn(self, argv: Sequence[str], env: Sequence[str], **kwargs) -> asyncio.Transport:
@@ -59,7 +61,7 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
         user_env = dict(e.split('=', 1) for e in env)
         return SubprocessTransport(loop, self, argv, env=dict(os.environ, **user_env), **kwargs)
 
-    async def start(self, init_host: Optional[str] = None) -> Dict[str, object]:
+    async def start(self, init_host: Optional[str] = None, **kwargs: JsonDocument) -> JsonObject:
         """Request that the Peer is started and connected to the router.
 
         Creates the transport, connects it to the protocol, and participates in
@@ -68,9 +70,9 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
 
         The Peer starts out in a frozen state (ie: attempts to send messages to
         it will initially be queued). If init_host is not None then an init
-        message is sent with the given 'host' field and the queue is thawed.
-        Otherwise, the caller is responsible for sending the init message and
-        thawing the peer.
+        message is sent with the given 'host' field, plus any extra kwargs, and
+        the queue is thawed. Otherwise, the caller is responsible for sending
+        the init message and thawing the peer.
 
         In any case, the return value is the init message from the peer.
         """
@@ -97,9 +99,11 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
             #   - other transport exception
             init_message = await self.init_future
 
-        except PeerExited:
-            # This is a fairly generic error.  If the connection process is
-            # still running, perhaps we'd get a better error message from it.
+        except (PeerExited, BrokenPipeError):
+            # These are fairly generic errors. PeerExited means that we observed the process exiting.
+            # BrokenPipeError means that we got EPIPE when attempting to write() to it. In both cases,
+            # the process is gone, but it's not clear why. If the connection process is still running,
+            # perhaps we'd get a better error message from it.
             await connect_task
             # Otherwise, re-raise
             raise
@@ -114,7 +118,7 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
         if init_host is not None:
             logger.debug('  sending init message back, host %s', init_host)
             # Send "init" back
-            self.write_control(command='init', version=1, host=init_host)
+            self.write_control(None, command='init', version=1, host=init_host, **kwargs)
 
             # Thaw the queued messages
             self.thaw_endpoint()
@@ -122,7 +126,7 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
         return init_message
 
     # Background initialization
-    def start_in_background(self, init_host: Optional[str] = None) -> None:
+    def start_in_background(self, init_host: Optional[str] = None, **kwargs: JsonDocument) -> None:
         def _start_task_done(task: asyncio.Task) -> None:
             assert task is start_task
 
@@ -131,7 +135,7 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
             except (OSError, PeerExited, CockpitProblem, asyncio.CancelledError):
                 pass  # Those are expected.  Others will throw.
 
-        start_task = asyncio.create_task(self.start(init_host))
+        start_task = asyncio.create_task(self.start(init_host, **kwargs))
         start_task.add_done_callback(_start_task_done)
 
     # Shutdown
@@ -139,10 +143,20 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
         self.done_callbacks.append(callback)
 
     # Handling of interesting events
-    def transport_control_received(self, command: str, message: Dict[str, object]) -> None:
+    def do_superuser_init_done(self) -> None:
+        pass
+
+    def do_authorize(self, message: JsonObject) -> None:
+        pass
+
+    def transport_control_received(self, command: str, message: JsonObject) -> None:
         if command == 'init' and self.init_future is not None:
             logger.debug('Got init message with active init_future.  Setting result.')
             self.init_future.set_result(message)
+        elif command == 'authorize':
+            self.do_authorize(message)
+        elif command == 'superuser-init-done':
+            self.do_superuser_init_done()
         else:
             raise CockpitProtocolError(f'Received unexpected control message {command}')
 
@@ -168,7 +182,7 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
             else:
                 self.shutdown_endpoint(problem='terminated', message=f'Peer exited with status {exc.exit_code}')
         elif isinstance(exc, CockpitProblem):
-            self.shutdown_endpoint(problem=exc.problem, **exc.kwargs)
+            self.shutdown_endpoint(exc.attrs)
         else:
             self.shutdown_endpoint(problem='internal-error',
                                    message=f"[{exc.__class__.__name__}] {exc!s}")
@@ -192,10 +206,10 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
         self.close(PeerExited(returncode))
 
     # Forwarding data: from the peer to the router
-    def channel_control_received(self, channel: str, command: str, message: Dict[str, object]) -> None:
+    def channel_control_received(self, channel: str, command: str, message: JsonObject) -> None:
         if self.init_future is not None:
             raise CockpitProtocolError('Received unexpected channel control message before init')
-        self.send_channel_control(**message)
+        self.send_channel_control(channel, command, message)
 
     def channel_data_received(self, channel: str, data: bytes) -> None:
         if self.init_future is not None:
@@ -203,9 +217,9 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
         self.send_channel_data(channel, data)
 
     # Forwarding data: from the router to the peer
-    def do_channel_control(self, channel: str, command: str, message: Dict[str, object]) -> None:
+    def do_channel_control(self, channel: str, command: str, message: JsonObject) -> None:
         assert self.init_future is None
-        self.write_control(**message)
+        self.write_control(message)
 
     def do_channel_data(self, channel: str, data: bytes) -> None:
         assert self.init_future is None
@@ -215,32 +229,40 @@ class Peer(CockpitProtocol, SubprocessProtocol, Endpoint):
         assert self.init_future is None
         self.write_control(command='kill', host=host, group=group)
 
+    def do_close(self) -> None:
+        self.close()
+
 
 class ConfiguredPeer(Peer):
+    config: BridgeConfig
     args: Sequence[str]
     env: Sequence[str]
 
-    def __init__(self, router: Router, config: Dict[str, object]):
-        self.args = config['spawn']  # type: ignore[assignment]
-        self.env = config.get('environ', [])  # type: ignore[assignment]
+    def __init__(self, router: Router, config: BridgeConfig):
+        self.config = config
+        self.args = config.spawn
+        self.env = config.environ
         super().__init__(router)
 
-    async def do_connect_transport(self):
-        return await self.spawn(self.args, self.env)
+    async def do_connect_transport(self) -> None:
+        await self.spawn(self.args, self.env)
 
 
 class PeerRoutingRule(RoutingRule):
-    config: Dict[str, object]
+    config: BridgeConfig
+    match: JsonObject
     peer: Optional[Peer]
 
-    def __init__(self, router: Router, config: Dict[str, object]):
+    def __init__(self, router: Router, config: BridgeConfig):
         super().__init__(router)
         self.config = config
+        self.match = config.match
         self.peer = None
 
-    def apply_rule(self, options: Dict[str, object]) -> Optional[Peer]:
+    def apply_rule(self, options: JsonObject) -> Optional[Peer]:
         # Check that we match
-        for key, value in self.config['match'].items():  # type: ignore[attr-defined]
+
+        for key, value in self.match.items():
             if key not in options:
                 logger.debug('        rejecting because key %s is missing', key)
                 return None
@@ -268,10 +290,10 @@ class PeerRoutingRule(RoutingRule):
 class PeersRoutingRule(RoutingRule):
     rules: List[PeerRoutingRule] = []
 
-    def apply_rule(self, options: Dict[str, object]) -> Optional[Endpoint]:
+    def apply_rule(self, options: JsonObject) -> Optional[Endpoint]:
         logger.debug('    considering %d rules', len(self.rules))
         for rule in self.rules:
-            logger.debug('      considering %s', rule.config.get('spawn'))
+            logger.debug('      considering %s', rule.config.name)
             endpoint = rule.apply_rule(options)
             if endpoint is not None:
                 logger.debug('        selected')
@@ -279,17 +301,17 @@ class PeersRoutingRule(RoutingRule):
         logger.debug('      no peer rules matched')
         return None
 
-    def set_configs(self, bridge_configs: List[Dict[str, object]]) -> None:
+    def set_configs(self, bridge_configs: Sequence[BridgeConfig]) -> None:
         old_rules = self.rules
         self.rules = []
 
         for config in bridge_configs:
             # Those are handled elsewhere...
-            if config.get('privileged') or 'host' in config['match']:  # type: ignore[operator]
+            if config.privileged or 'host' in config.match:
                 continue
 
             # Try to reuse an existing rule, if one exists...
-            for rule in old_rules:
+            for rule in list(old_rules):
                 if rule.config == config:
                     old_rules.remove(rule)
                     break

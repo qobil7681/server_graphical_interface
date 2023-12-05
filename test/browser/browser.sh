@@ -5,22 +5,20 @@ set -eux
 # like "basic", passed on to run-test.sh
 PLAN="$1"
 
+export TEST_BROWSER=${TEST_BROWSER:-firefox}
+
 MYDIR="$(realpath $(dirname "$0"))"
-if [ -d source ]; then
-    # path for standard-test-source
-    SOURCE="$(pwd)/source"
-else
-    SOURCE="$(realpath $MYDIR/../..)"
-fi
+SOURCE="$(realpath $MYDIR/../..)"
 # https://tmt.readthedocs.io/en/stable/overview.html#variables
 LOGS="${TMT_TEST_DATA:-$(pwd)/logs}"
+export SOURCE LOGS
 mkdir -p "$LOGS"
 chmod a+w "$LOGS"
 
 # show some system info
 nproc
 free -h
-rpm -q cockpit-system
+rpm -qa | grep cockpit
 
 # install firefox (available everywhere in Fedora and RHEL)
 # we don't need the H.264 codec, and it is sometimes not available (rhbz#2005760)
@@ -45,10 +43,29 @@ if grep -q 'ID=.*fedora' /etc/os-release && [ "$PLAN" = "basic" ]; then
     dnf install -y abrt abrt-addon-ccpp reportd libreport-plugin-bugzilla libreport-fedora
 fi
 
+# dnf installs "missing" weak dependencies, but we don't want them for plans other than "optional"
+if [ "$PLAN" != "optional" ] && rpm -q cockpit-packagekit; then
+    dnf remove -y cockpit-packagekit
+fi
+
 if grep -q 'ID=.*rhel' /etc/os-release; then
     # required by TestUpdates.testKpatch, but kpatch is only in RHEL
     dnf install -y kpatch kpatch-dnf
 fi
+
+# if we run during cross-project testing against our main-builds COPR, then let that win
+# even if Fedora has a newer revision
+main_builds_repo="$(ls /etc/yum.repos.d/*cockpit*main-builds* 2>/dev/null || true)"
+if [ -n "$main_builds_repo" ]; then
+    echo 'priority=0' >> "$main_builds_repo"
+    dnf distro-sync -y 'cockpit*'
+fi
+
+# RHEL 8 does not build cockpit-tests; when dropping RHEL 8 support, move to test/browser/main.fmf
+if [ "$PLAN" = basic ] && ! grep -q el8 /etc/os-release; then
+    dnf install -y cockpit-tests
+fi
+
 
 # On CentOS Stream 8 the cockpit package is upgraded so the file isn't touched.
 if [ ! -f /etc/cockpit/disallowed-users ]; then
@@ -89,7 +106,9 @@ firewall-cmd --add-service=cockpit --permanent
 firewall-cmd --add-service=cockpit
 
 # Run tests as unprivileged user
-su - -c "env TEST_BROWSER=firefox SOURCE=$SOURCE LOGS=$LOGS $MYDIR/run-test.sh $PLAN" runtest
+# once we drop support for RHEL 8, use this:
+# runuser -u runtest --whitelist-environment=TEST_BROWSER,TEST_ALLOW_JOURNAL_MESSAGES,TEST_AUDIT_NO_SELINUX,SOURCE,LOGS "$MYDIR/run-test.sh" "$PLAN"
+runuser -u runtest --preserve-environment env USER=runtest HOME="$(getent passwd runtest | cut -f6 -d:)" "$MYDIR/run-test.sh" "$PLAN"
 
 RC=$(cat $LOGS/exitcode)
 exit ${RC:-1}

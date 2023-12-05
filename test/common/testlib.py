@@ -70,7 +70,6 @@ __all__ = (
     'onlyImage',
     'skipImage',
     'skipDistroPackage',
-    'skipMobile',
     'skipOstree',
     'skipBrowser',
     'todo',
@@ -162,7 +161,7 @@ def attach(filename: str, move: bool = False):
 
     :param filename: file to put in attachments directory
     :param move: set this to true to move dynamically generated files which
-                 are not touched by parallel tests. (default False)
+                 are not touched by destructive tests. (default False)
     """
     if not opts.attachments:
         return
@@ -235,7 +234,20 @@ class Browser:
             self.cdp.invoke("Network.setCookie", **cookie)
 
         self.switch_to_top()
-        self.cdp.invoke("Page.navigate", url=href)
+        opts = {}
+        if self.cdp.browser.name == "firefox":
+            # by default, Firefox optimizes this away if the current and the given href URL
+            # are the same (Like in TestKeys.testAuthorizedKeys).
+            # Force a reload in this case, to make tests and the waitPageLoad below predictable
+            # But that option has the inverse effect with Chromium (argh)
+            opts["transitionType"] = "reload"
+        elif self.cdp.browser.name == 'chromium':
+            # Chromium also optimizes this away, but doesn't have a knob to force loading
+            # so load the blank page first
+            self.cdp.invoke("Page.navigate", url="about:blank")
+            self.cdp.invoke("waitPageLoad", timeout=5)
+        self.cdp.invoke("Page.navigate", url=href, **opts)
+        self.cdp.invoke("waitPageLoad", timeout=self.cdp.timeout)
 
     def set_user_agent(self, ua: str):
         """Set the user agent of the browser
@@ -491,11 +503,13 @@ class Browser:
             self.cdp.invoke("Input.dispatchKeyEvent", **args)
 
     def _key_press_firefox(self, keys: str, modifiers: int = 0, use_ord: bool = False):
-        # https://github.com/GoogleChrome/puppeteer/blob/master/lib/USKeyboardLayout.js
+        # https://python-reference.readthedocs.io/en/latest/docs/str/ASCII.html
+        # Both line feed and carriage return are normalized to Enter (https://html.spec.whatwg.org/multipage/form-elements.html)
         keyMap = {
             8: "Backspace",   # Backspace key
             9: "Tab",         # Tab key
-            13: "Enter",      # Enter key
+            10: "Enter",      # Enter key (normalized from line feed)
+            13: "Enter",      # Enter key (normalized from carriage return)
             27: "Escape",     # Escape key
             37: "ArrowLeft",  # Arrow key left
             40: "ArrowDown",  # Arrow key down
@@ -514,7 +528,7 @@ class Browser:
 
     def select_from_dropdown(self, selector: str, value):
         self.wait_visible(selector + ':not([disabled]):not([aria-disabled=true])')
-        text_selector = "{0} option[value='{1}']".format(selector, value)
+        text_selector = f"{selector} option[value='{value}']"
         self._wait_present(text_selector)
         self.set_val(selector, value)
         self.wait_val(selector, value)
@@ -543,7 +557,7 @@ class Browser:
             self.wait_val(selector, val)
 
     def set_file_autocomplete_val(self, group_identifier: str, location: str):
-        self.set_input_text(f"{group_identifier} .pf-v5-c-select__toggle-typeahead", location)
+        self.set_input_text(f"{group_identifier} .pf-v5-c-select__toggle-typeahead input", location)
         # click away the selection list, to force a state update
         self.click(f"{group_identifier} .pf-v5-c-select__toggle-typeahead")
         self.wait_not_present(f"{group_identifier} .pf-v5-c-select__menu")
@@ -585,14 +599,15 @@ class Browser:
                 if "exceptionDetails" in result:
                     trailer = "\n".join(self.cdp.get_js_log())
                     self.raise_cdp_exception("timeout\nwait_js_cond", cond, result["exceptionDetails"], trailer)
-                duration = time.time() - start
-                percent = int(duration / timeout * 100)
-                if percent >= 50:
-                    print(f"WARNING: Waiting for {cond} took {duration:.1f} seconds, which is {percent}% of the timeout.")
+                if timeout > 0:
+                    duration = time.time() - start
+                    percent = int(duration / timeout * 100)
+                    if percent >= 50:
+                        print(f"WARNING: Waiting for {cond} took {duration:.1f} seconds, which is {percent}% of the timeout.")
                 return
             except RuntimeError as e:
                 data = e.args[0]
-                if count < 20 and type(data) == dict and "response" in data and data["response"].get("message") in ["Execution context was destroyed.", "Cannot find context with specified id"]:
+                if count < 20 and isinstance(data, dict) and "response" in data and data["response"].get("message") in ["Execution context was destroyed.", "Cannot find context with specified id"]:
                     time.sleep(1)
                 else:
                     raise e
@@ -798,27 +813,21 @@ class Browser:
 
     def logout(self):
         self.assert_no_oops()
-
         self.switch_to_top()
 
-        # changed in #16522
-        prev_shell = self.machine.system_before(258)
-
-        if prev_shell:
-            self.wait_visible("#navbar-dropdown")
-        else:
-            self.wait_visible("#toggle-menu")
+        self.wait_visible("#toggle-menu")
         if self.is_present("button#machine-reconnect") and self.is_visible("button#machine-reconnect"):
             # happens when shutting down cockpit or rebooting machine
             self.click("button#machine-reconnect")
         else:
             # happens when cockpit is still running
-            if prev_shell:
-                self.click("#navbar-dropdown")
-                self.click('#go-logout')
-            else:
-                self.open_session_menu()
+            self.open_session_menu()
+            try:
                 self.click('#logout')
+            except RuntimeError as e:
+                # logging out does destroy the current frame context, it races with the CDP driver finishing the command
+                if "Execution context was destroyed" not in str(e):
+                    raise
         self.wait_visible('#login')
 
         self.machine.allow_restart_journal_messages()
@@ -867,17 +876,15 @@ class Browser:
 
         self.open_superuser_dialog()
 
-        pf_prefix = "" if self.machine.system_before(293) else "-v5"
-
         if passwordless:
-            self.wait_in_text(f".pf{pf_prefix}-c-modal-box:contains('Administrative access')", "You now have administrative access.")
-            self.click(f".pf{pf_prefix}-c-modal-box button:contains('Close')")
-            self.wait_not_present(f".pf{pf_prefix}-c-modal-box:contains('You now have administrative access.')")
+            self.wait_in_text("div[role=dialog]:contains('Administrative access')", "You now have administrative access.")
+            self.click("div[role=dialog] button:contains('Close')")
+            self.wait_not_present("div[role=dialog]:contains('You now have administrative access.')")
         else:
-            self.wait_in_text(f".pf{pf_prefix}-c-modal-box:contains('Switch to administrative access')", f"Password for {user or 'admin'}:")
-            self.set_input_text(f".pf{pf_prefix}-c-modal-box:contains('Switch to administrative access') input", password or "foobar")
-            self.click(f".pf{pf_prefix}-c-modal-box button:contains('Authenticate')")
-            self.wait_not_present(f".pf{pf_prefix}-c-modal-box:contains('Switch to administrative access')")
+            self.wait_in_text("div[role=dialog]:contains('Switch to administrative access')", f"Password for {user or 'admin'}:")
+            self.set_input_text("div[role=dialog]:contains('Switch to administrative access') input", password or "foobar")
+            self.click("div[role=dialog] button:contains('Authenticate')")
+            self.wait_not_present("div[role=dialog]:contains('Switch to administrative access')")
 
         self.check_superuser_indicator("Administrative access")
         self.switch_to_frame(cur_frame)
@@ -886,11 +893,9 @@ class Browser:
         cur_frame = self.cdp.cur_frame
         self.switch_to_top()
 
-        pf_prefix = "" if self.machine.system_before(293) else "-v5"
-
         self.open_superuser_dialog()
-        self.click(f".pf{pf_prefix}-c-modal-box:contains('Switch to limited access') button:contains('Limit access')")
-        self.wait_not_present(f".pf{pf_prefix}-c-modal-box:contains('Switch to limited access')")
+        self.click("div[role=dialog]:contains('Switch to limited access') button:contains('Limit access')")
+        self.wait_not_present("div[role=dialog]:contains('Switch to limited access')")
         self.check_superuser_indicator("Limited access")
 
         self.switch_to_frame(cur_frame)
@@ -929,7 +934,7 @@ class Browser:
         if self.cdp and self.cdp.valid:
             self.cdp.command("clearExceptions()")
 
-            filename = "{0}-{1}.png".format(label or self.label, title)
+            filename = f"{label or self.label}-{title}.png"
             if self.body_clip:
                 ret = self.cdp.invoke("Page.captureScreenshot", clip=self.body_clip, no_trace=True)
             else:
@@ -942,7 +947,7 @@ class Browser:
             else:
                 print("Screenshot not available")
 
-            filename = "{0}-{1}.html".format(label or self.label, title)
+            filename = f"{label or self.label}-{title}.html"
             html = self.cdp.invoke("Runtime.evaluate", expression="document.documentElement.outerHTML",
                                    no_trace=True)["result"]["value"]
             with open(filename, 'wb') as f:
@@ -969,7 +974,7 @@ class Browser:
         self.set_attr("html", "dir", direction)
 
     def set_layout(self, name: str):
-        layout = [lo for lo in self.layouts if lo["name"] == name][0]
+        layout = next(lo for lo in self.layouts if lo["name"] == name)
         if layout != self.current_layout:
             self.current_layout = layout
             size = layout["shell_size"]
@@ -998,7 +1003,8 @@ class Browser:
                                         mock: Optional[Dict[str, str]] = None,
                                         sit_after_mock: bool = False,
                                         scroll_into_view: Optional[str] = None,
-                                        wait_animations: bool = True):
+                                        wait_animations: bool = True,
+                                        wait_delay: float = 0.5):
         """Compare the given element with its reference in the current layout"""
 
         if ignore is None:
@@ -1006,11 +1012,6 @@ class Browser:
 
         if not (Image and self.pixels_label):
             return
-
-        if mock is not None:
-            self.set_mock(mock, base=selector)
-            if sit_after_mock:
-                sit()
 
         self._adjust_window_for_fixed_content_size()
         self.call_js_func('ph_scrollIntoViewIfNeeded', scroll_into_view or selector)
@@ -1037,7 +1038,13 @@ class Browser:
         # wait half a second to and side-step all that complexity.
 
         if wait_animations:
+            time.sleep(wait_delay)
             self.wait_js_cond('ph_count_animations(%s) == 0' % jsquote(selector))
+
+        if mock is not None:
+            self.set_mock(mock, base=selector)
+            if sit_after_mock:
+                sit()
 
         rect = self.call_js_func('ph_element_clip', selector)
 
@@ -1091,7 +1098,7 @@ class Browser:
             #
             # - The RGB values of pixels can differ by up to 2.
             #
-            # - There can be up to 5 different pixels
+            # - There can be up to 20 different pixels
             #
             # Pixels that are different but have been ignored are
             # marked in the delta image in green.
@@ -1127,7 +1134,7 @@ class Browser:
                             else:
                                 data_delta[x, y] = (255, 0, 0, 255)
                                 count += 1
-                                if count > 5:
+                                if count > 20:
                                     result = False
                         else:
                             data_delta[x, y] = data_ref[x, y]
@@ -1157,6 +1164,7 @@ class Browser:
                       skip_layouts: Optional[List[str]] = None,
                       scroll_into_view: Optional[str] = None,
                       wait_animations: bool = True,
+                      wait_after_layout_change: bool = False,
                       wait_delay: float = 0.5):
         """Compare the given element with its reference in all layouts"""
 
@@ -1182,13 +1190,15 @@ class Browser:
             for layout in self.layouts:
                 if layout["name"] not in skip_layouts:
                     self.set_layout(layout["name"])
-                    time.sleep(wait_delay)
                     if "rtl" in self.current_layout["name"]:
                         self._set_direction("rtl")
+                    if wait_after_layout_change:
+                        time.sleep(wait_delay)
                     self.assert_pixels_in_current_layout(selector, key, ignore=ignore,
                                                          mock=mock, sit_after_mock=sit_after_mock,
                                                          scroll_into_view=scroll_into_view,
-                                                         wait_animations=wait_animations)
+                                                         wait_animations=wait_animations,
+                                                         wait_delay=wait_delay)
 
                     if "rtl" in self.current_layout["name"]:
                         self._set_direction("ltr")
@@ -1218,7 +1228,7 @@ class Browser:
 
         logs = list(self.get_js_log())
         if logs:
-            filename = "{0}-{1}.js.log".format(label or self.label, title)
+            filename = f"{label or self.label}-{title}.js.log"
             with open(filename, 'wb') as f:
                 f.write('\n'.join(logs).encode('UTF-8'))
             attach(filename, move=True)
@@ -1266,7 +1276,7 @@ class MachineCase(unittest.TestCase):
             return cls.global_machine
         cls.global_machine = cls.new_machine(cls, restrict=True, cleanup=False)
         if opts.trace:
-            print("Starting global machine {0}".format(cls.global_machine.label))
+            print(f"Starting global machine {cls.global_machine.label}")
         cls.global_machine.start()
         return cls.global_machine
 
@@ -1279,8 +1289,9 @@ class MachineCase(unittest.TestCase):
     def label(self):
         return self.__class__.__name__ + '-' + self._testMethodName
 
-    def new_machine(self, image=None, forward=None, restrict=True, cleanup=True, **kwargs):
-        machine_class = self.machine_class
+    def new_machine(self, image=None, forward=None, restrict=True, cleanup=True, inherit_machine_class=True, **kwargs):
+        machine_class = inherit_machine_class and self.machine_class or testvm.VirtMachine
+
         if opts.address:
             if forward:
                 raise unittest.SkipTest("Cannot run this test when specific machine address is specified")
@@ -1292,8 +1303,6 @@ class MachineCase(unittest.TestCase):
                 image = os.path.join(TEST_DIR, "images", self.image)
                 if not os.path.exists(image):
                     raise FileNotFoundError("Can't run tests without a prepared image; use test/image-prepare")
-            if not machine_class:
-                machine_class = testvm.VirtMachine
             if not self.network:
                 network = testvm.VirtNetwork(image=image)
                 if cleanup:
@@ -1436,7 +1445,7 @@ class MachineCase(unittest.TestCase):
                     first_machine = False
                     self.machine = machine
                 if opts.trace:
-                    print("Starting {0} {1}".format(key, machine.label))
+                    print(f"Starting {key} {machine.label}")
                 machine.start()
 
         self.danger_btn_class = '.pf-m-danger'
@@ -1534,10 +1543,13 @@ class MachineCase(unittest.TestCase):
                         "for dev in $(ls /sys/bus/pseudo/drivers/scsi_debug/adapter*/host*/target*/*:*/block); do "
                         "    for s in /sys/block/*/slaves/${dev}*; do [ -e $s ] || break; "
                         "        d=/dev/$(dirname $(dirname ${s#/sys/block/})); "
+                        "        while fuser --mount $d --kill; do sleep 0.1; done; "
                         "        umount $d || true; dmsetup remove --force $d || true; "
                         "    done; "
-                        "    umount /dev/$dev 2>/dev/null || true; "
-                        "done; until rmmod scsi_debug; do sleep 0.2; done")
+                        "    while fuser --mount /dev/$dev --kill; do sleep 0.1; done; "
+                        "    umount /dev/$dev || true; "
+                        "    swapon --show=NAME --noheadings | grep $dev | xargs -r swapoff; "
+                        "done; until rmmod scsi_debug; do sleep 0.2; done", stdout=None)
 
         def terminate_sessions():
             # on OSTree we don't get "web console" sessions with the cockpit/ws container; just SSH; but also, some tests start
@@ -1614,6 +1626,33 @@ class MachineCase(unittest.TestCase):
         with self.browser.wait_timeout(30):
             self.browser.login_and_go(path, user=user, host=host, superuser=superuser, urlroot=urlroot, tls=tls)
 
+    def start_machine_troubleshoot(self, new=False, known_host=False, password=None, expect_closed_dialog=True, browser=None):
+        b = browser or self.browser
+
+        b.wait_visible("#machine-troubleshoot")
+        b.click('#machine-troubleshoot')
+
+        b.wait_visible('#hosts_setup_server_dialog')
+        if new:
+            b.click('#hosts_setup_server_dialog button:contains(Add)')
+            if not known_host:
+                b.wait_in_text('#hosts_setup_server_dialog', "You are connecting to")
+                b.wait_in_text('#hosts_setup_server_dialog', "for the first time.")
+                b.click("#hosts_setup_server_dialog button:contains('Trust and add host')")
+        if password:
+            b.wait_in_text('#hosts_setup_server_dialog', "Unable to log in")
+            b.set_input_text('#login-custom-password', password)
+            b.click('#hosts_setup_server_dialog button:contains(Log in)')
+        if expect_closed_dialog:
+            b.wait_not_present('#hosts_setup_server_dialog')
+
+    def add_machine(self, address, known_host=False, password="foobar", browser=None):
+        b = browser or self.browser
+        b.switch_to_top()
+        b.go(f"/@{address}")
+        self.start_machine_troubleshoot(new=True, known_host=known_host, password=password, browser=browser)
+        b.enter_page("/system", host=address)
+
     # List of allowed journal messages during tests; these need to match the *entire* message
     default_allowed_messages = [
         # This is a failed login, which happens every time
@@ -1655,6 +1694,7 @@ class MachineCase(unittest.TestCase):
         # SELinux messages to ignore
         "(audit: )?type=1403 audit.*",
         "(audit: )?type=1404 audit.*",
+        "(audit: )?type=1405 audit.*",
 
         # apparmor loading
         "(audit: )?type=1400.*apparmor=\"STATUS\".*",
@@ -1689,12 +1729,15 @@ class MachineCase(unittest.TestCase):
         "For security reasons, the password you type will not be visible",
 
         # starting out with empty PCP logs and pmlogger not running causes these metrics channel messages
-        "pcp-archive: no such metric: .*: Unknown metric name",
-        "pcp-archive: instance name lookup failed:.*",
-        "pcp-archive: couldn't create pcp archive context for.*",
+        "(direct|pcp-archive): no such metric: .*: Unknown metric name",
+        "(direct|pcp-archive): instance name lookup failed:.*",
+        "(direct|pcp-archive): couldn't create pcp archive context for.*",
 
         # timedatex.service shuts down after timeout, runs into race condition with property watching
         ".*org.freedesktop.timedate1: couldn't get all properties.*Error:org.freedesktop.DBus.Error.NoReply.*",
+
+        # https://github.com/cockpit-project/cockpit/issues/19235
+        "invalid non-UTF8 @data passed as text to web_socket_connection_send.*",
     ]
 
     default_allowed_messages += os.environ.get("TEST_ALLOW_JOURNAL_MESSAGES", "").split(",")
@@ -1703,10 +1746,29 @@ class MachineCase(unittest.TestCase):
     default_allowed_console_errors = [
         # HACK: These should be fixed, but debugging these is not trivial, and the impact is very low
         "Warning: .* setState.*on an unmounted component",
-        "Warning: Can't perform a React state update on an unmounted component."
+        "Warning: Can't perform a React state update on an unmounted component",
+        "Warning: Cannot update a component.*while rendering a different component",
+        "Warning: A component is changing an uncontrolled input to be controlled",
+        "Warning: A component is changing a controlled input to be uncontrolled",
+        "Warning: Can't call.*on a component that is not yet mounted. This is a no-op",
+        "Warning: Cannot update during an existing state transition",
+        r"Warning: You are calling ReactDOMClient.createRoot\(\) on a container that has already been passed to createRoot",
+
+        # FIXME: PatternFly complains about these, but https://www.a11y-collective.com/blog/the-first-rule-for-using-aria/
+        # and https://www.accessibility-developer-guide.com/knowledge/aria/bad-practices/
+        "aria-label",
+
+        # PackageKit crashes a lot; let that not be the sole reason for failing a test
+        "error: Could not determine kpatch packages:.*PackageKit crashed",
     ]
 
-    default_allowed_console_errors += os.environ.get("TEST_ALLOW_BROWSER_ERRORS", "").split(",")
+    if testvm.DEFAULT_IMAGE.startswith('rhel-8') or testvm.DEFAULT_IMAGE.startswith('centos-8'):
+        # old occasional bugs in tracer, don't happen in newer versions any more
+        default_allowed_console_errors.append('Tracer failed:.*Traceback')
+
+    env_allow = os.environ.get("TEST_ALLOW_BROWSER_ERRORS")
+    if env_allow:
+        default_allowed_console_errors += env_allow.split(",")
 
     def allow_journal_messages(self, *patterns: str):
         """Don't fail if the journal contains a entry completely matching the given regexp"""
@@ -1733,7 +1795,7 @@ class MachineCase(unittest.TestCase):
                                     ".*couldn't create polkit session subject: No session for pid.*",
                                     "We are no longer a registered authentication agent.",
                                     ".*: failed to retrieve resource: terminated",
-                                    ".*: external channel failed: terminated",
+                                    ".*: external channel failed: (terminated|protocol-error)",
                                     'audit:.*denied.*comm="systemd-user-se".*nologin.*',
                                     ".*No session for cookie",
 
@@ -1795,6 +1857,7 @@ class MachineCase(unittest.TestCase):
             "Traceback .*most recent call last.*",
             "File .*",
             "async with self.watch_processing_lock:",
+            "self.send_message.*",
             "self.release.*",
             "self._wake_up_first.*",
             "fut.set_result.*",
@@ -1919,7 +1982,7 @@ class MachineCase(unittest.TestCase):
         # write the report
         if suffix:
             suffix = "-" + suffix
-        filename = "{0}{1}-axe.json.gz".format(label or self.label(), suffix)
+        filename = f"{label or self.label()}{suffix}-axe.json.gz"
         with gzip.open(filename, "wb") as f:
             f.write(json.dumps(report).encode('UTF-8'))
         print("Wrote accessibility report to " + filename)
@@ -2001,27 +2064,29 @@ class MachineCase(unittest.TestCase):
         The optional apply_change_action will be run both after sedding and after restoring the file.
         """
         m = self.machine
-        m.execute("sed -i.cockpittest '{0}' {1}".format(expr, path))
+        m.execute(f"sed -i.cockpittest '{expr}' {path}")
         if apply_change_action:
             m.execute(apply_change_action)
 
         if self.is_nondestructive():
             if apply_change_action:
                 self.addCleanup(m.execute, apply_change_action)
-            self.addCleanup(m.execute, "mv {0}.cockpittest {0}".format(path))
+            self.addCleanup(m.execute, f"mv {path}.cockpittest {path}")
 
     def file_exists(self, path: str) -> bool:
         """Check if file exists on test machine"""
 
         return self.machine.execute(f"if test -e {path}; then echo yes; fi").strip() != ""
 
-    def restore_dir(self, path: str, post_restore_action: Optional[str] = None, reboot_safe: bool = False):
+    def restore_dir(self, path: str, post_restore_action: Optional[str] = None, reboot_safe: bool = False,
+                    restart_unit: Optional[str] = None):
         """Backup/restore a directory for a nondestructive test
 
         This takes care to not ever touch the original content on disk, but uses transient overlays.
         As this uses a bind mount, it does not work for files that get changed atomically (with mv);
         use restore_file() for these.
 
+        `restart_unit` will be stopped before restoring path, and restarted afterwards if it was running.
         The optional post_restore_action will run after restoring the original content.
 
         If the directory needs to survive reboot, `reboot_safe=True` needs to be specified; then this
@@ -2030,31 +2095,42 @@ class MachineCase(unittest.TestCase):
         if not self.is_nondestructive() and not self.machine.ostree_image:
             return  # skip for efficiency reasons
 
+        exe = self.machine.execute
+
         if not self.file_exists(path):
-            self.addCleanup(self.machine.execute, "rm -rf {0}".format(path))
+            self.addCleanup(exe, f"rm -rf '{path}'")
             return
 
         backup = os.path.join(self.vm_tmpdir, path.replace('/', '_'))
-        self.machine.execute("mkdir -p %(vm_tmpdir)s; cp -a %(path)s/ %(backup)s/" % {
-            "vm_tmpdir": self.vm_tmpdir, "path": path, "backup": backup})
+        exe(f"mkdir -p {self.vm_tmpdir}; cp -a {path}/ {backup}/")
 
         if not reboot_safe:
-            self.machine.execute("mount -o bind %(backup)s %(path)s" % {
-                "path": path, "backup": backup})
+            exe(f"mount -o bind {backup} {path}")
+
+        if restart_unit:
+            restart_stamp = f"/run/cockpit_restart_{restart_unit}"
+            self.addCleanup(
+                exe,
+                f"if [ -e {restart_stamp} ]; then systemctl start {restart_unit}; rm {restart_stamp}; fi"
+            )
 
         if post_restore_action:
-            self.addCleanup(self.machine.execute, post_restore_action)
+            self.addCleanup(exe, post_restore_action)
 
         if reboot_safe:
-            self.addCleanup(self.machine.execute, f"rm -rf {path}; mv {backup} {path}")
+            self.addCleanup(exe, f"rm -rf {path}; mv {backup} {path}")
         else:
             # HACK: a lot of tests call this on /home/...; that restoration happens before killing all user
             # processes in nonDestructiveSetup(), so we have to do it lazily
             if path.startswith("/home"):
                 cmd = f"umount -lf {path}"
             else:
-                cmd = f"umount {path} || {{ fuser -uvk {path}/* || true; sleep 1; umount {path}; }}"
-            self.addCleanup(self.machine.execute, cmd)
+                cmd = f"umount {path} || {{ fuser -uvk {path} {path}/* >&2 || true; sleep 1; umount {path}; }}"
+            self.addCleanup(exe, cmd)
+
+        if restart_unit:
+            self.addCleanup(exe, f"if systemctl --quiet is-active {restart_unit}; then touch {restart_stamp}; fi; "
+                            f"systemctl stop {restart_unit}")
 
     def restore_file(self, path: str, post_restore_action: Optional[str] = None):
         """Backup/restore a file for a nondestructive test
@@ -2071,11 +2147,10 @@ class MachineCase(unittest.TestCase):
 
         if self.file_exists(path):
             backup = os.path.join(self.vm_tmpdir, path.replace('/', '_'))
-            self.machine.execute("mkdir -p %(vm_tmpdir)s; cp -a %(path)s %(backup)s" % {
-                "vm_tmpdir": self.vm_tmpdir, "path": path, "backup": backup})
-            self.addCleanup(self.machine.execute, "mv %(backup)s %(path)s" % {"path": path, "backup": backup})
+            self.machine.execute(f"mkdir -p {self.vm_tmpdir}; cp -a {path} {backup}")
+            self.addCleanup(self.machine.execute, f"mv {backup} {path}")
         else:
-            self.addCleanup(self.machine.execute, "rm -rf %s" % path)
+            self.addCleanup(self.machine.execute, f"rm -f {path}")
 
     def write_file(self, path: str, content: str, append: bool = False, owner: Optional[str] = None, perm: Optional[str] = None,
                    post_restore_action: Optional[str] = None):
@@ -2125,6 +2200,23 @@ class MachineCase(unittest.TestCase):
             m.execute(f"hostnamectl set-hostname {name}")
             if disable_preload:
                 self.disable_preload("packagekit", "playground", "systemd", machine=m)
+
+    def authorize_pubkey(self, machine, account, pubkey):
+        machine.execute(f"a={account} d=/home/$a/.ssh; mkdir -p $d; chown $a:$a $d; chmod 700 $d")
+        machine.write(f"/home/{account}/.ssh/authorized_keys", pubkey)
+        machine.execute(f"a={account}; chown $a:$a /home/$a/.ssh/authorized_keys")
+
+    def get_pubkey(self, machine, account):
+        return machine.execute(f"cat /home/{account}/.ssh/id_rsa.pub")
+
+    def setup_ssh_auth(self):
+        self.machine.execute("d=/home/admin/.ssh; mkdir -p $d; chown admin:admin $d; chmod 700 $d")
+        self.machine.execute("test -f /home/admin/.ssh/id_rsa || ssh-keygen -f /home/admin/.ssh/id_rsa -t rsa -N ''")
+        self.machine.execute("chown admin:admin /home/admin/.ssh/id_rsa*")
+        pubkey = self.get_pubkey(self.machine, "admin")
+
+        for m in self.machines:
+            self.authorize_pubkey(self.machines[m], "admin", pubkey)
 
 
 ###########################
@@ -2185,7 +2277,7 @@ def skipBrowser(reason: str, *browsers: str):
     """
     browser = os.environ.get("TEST_BROWSER", "chromium")
     if browser in browsers:
-        return unittest.skip("{0}: {1}".format(browser, reason))
+        return unittest.skip(f"{browser}: {reason}")
     return lambda testEntity: testEntity
 
 
@@ -2198,7 +2290,7 @@ def skipImage(reason: str, *images: str):
     Example: @skipImage("no btrfs support on RHEL", "rhel-*")
     """
     if any(fnmatch.fnmatch(testvm.DEFAULT_IMAGE, img) for img in images):
-        return unittest.skip("{0}: {1}".format(testvm.DEFAULT_IMAGE, reason))
+        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: {reason}")
     return lambda testEntity: testEntity
 
 
@@ -2209,7 +2301,7 @@ def onlyImage(reason: str, *images: str):
     support Unix shell style patterns via fnmatch.fnmatch.
     """
     if not any(fnmatch.fnmatch(testvm.DEFAULT_IMAGE, arg) for arg in images):
-        return unittest.skip("{0}: {1}".format(testvm.DEFAULT_IMAGE, reason))
+        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: {reason}")
     return lambda testEntity: testEntity
 
 
@@ -2219,17 +2311,7 @@ def skipOstree(reason: str):
     Skip test for *reason* on OSTree images defined in OSTREE_IMAGES in bots/lib/constants.py.
     """
     if testvm.DEFAULT_IMAGE in OSTREE_IMAGES:
-        return unittest.skip("{0}: {1}".format(testvm.DEFAULT_IMAGE, reason))
-    return lambda testEntity: testEntity
-
-
-def skipMobile():
-    """Decorator for skipping a test on mobile
-
-    Skip test on when TEST_MOBILE is set.
-    """
-    if bool(os.environ.get("TEST_MOBILE", "")):
-        return unittest.skip("mobile: This test breaks on small screen sizes")
+        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: {reason}")
     return lambda testEntity: testEntity
 
 
@@ -2264,7 +2346,7 @@ def no_retry_when_changed(testEntity):
     return testEntity
 
 
-def todo(reason=''):
+def todo(reason: str = ''):
     """Tests decorated with @todo are expected to fail.
 
     An optional reason can be given, and will appear in the TAP output if run
@@ -2276,7 +2358,7 @@ def todo(reason=''):
     return wrapper
 
 
-def todoPybridge(reason=None):
+def todoPybridge(reason: Optional[str] = None):
     if not reason:
         reason = 'still fails with python bridge'
 
@@ -2301,13 +2383,13 @@ def todoPybridge(reason=None):
     return wrap
 
 
-def todoPybridgeRHEL8(reason=None):
+def todoPybridgeRHEL8(reason: Optional[str] = None):
     if testvm.DEFAULT_IMAGE.startswith('rhel-8') or testvm.DEFAULT_IMAGE.startswith('centos-8'):
         return todoPybridge(reason or 'known fail on el8 with python bridge')
     return lambda testEntity: testEntity
 
 
-def timeout(seconds: str):
+def timeout(seconds: int):
     """Change default test timeout of 600s, for long running tests
 
     Can be applied to an individual test method or the entire class. This only
@@ -2334,22 +2416,22 @@ class TapRunner:
             return result
         except Exception:
             result.addError(test, sys.exc_info())
-            sys.stderr.write("Unexpected exception while running {0}\n".format(test))
+            sys.stderr.write(f"Unexpected exception while running {test}\n")
             sys.stderr.write(traceback.format_exc())
             return result
         else:
             result.printErrors()
 
         if result.skipped:
-            print("# Result {0} skipped: {1}".format(test, result.skipped[0][1]))
+            print(f"# Result {test} skipped: {result.skipped[0][1]}")
         elif result.wasSuccessful():
-            print("# Result {0} succeeded".format(test))
+            print(f"# Result {test} succeeded")
         else:
             for failure in result.failures:
                 print(failure[1])
             for error in result.errors:
                 print(error[1])
-            print("# Result {0} failed".format(test))
+            print(f"# Result {test} failed")
         return result
 
     def run(self, testable):
@@ -2380,13 +2462,13 @@ class TapRunner:
         # Report on the results
         duration = int(time.time() - start)
         hostname = socket.gethostname().split(".")[0]
-        details = "[{0}s on {1}]".format(duration, hostname)
+        details = f"[{duration}s on {hostname}]"
 
         MachineCase.kill_global_machine()
 
         # Return 77 if all tests were skipped
         if len(skips) == test_count:
-            sys.stdout.write("# SKIP {0}\n".format(", ".join(["{0} {1}".format(str(s[0]), s[1]) for s in skips])))
+            sys.stdout.write("# SKIP {0}\n".format(", ".join([f"{s[0]!s} {s[1]}" for s in skips])))
             return 77
         if failures:
             sys.stdout.write("# {0} TEST{1} FAILED {2}\n".format(failures, "S" if failures > 1 else "", details))
@@ -2402,7 +2484,7 @@ def print_tests(tests):
             print_tests(test)
         elif isinstance(test, unittest.loader._FailedTest):
             name = test.id().replace("unittest.loader._FailedTest.", "")
-            print("Error: '{0}' does not match a test".format(name), file=sys.stderr)
+            print(f"Error: '{name}' does not match a test", file=sys.stderr)
         else:
             print(test.id().replace("__main__.", ""))
 

@@ -19,19 +19,23 @@
 
 import cockpit from "cockpit";
 import React, { useState } from "react";
-import { Alert, AlertActionCloseButton } from "@patternfly/react-core/dist/esm/components/Alert/index.js";
+import { Alert, AlertActionCloseButton, AlertActionLink } from "@patternfly/react-core/dist/esm/components/Alert/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { Card } from "@patternfly/react-core/dist/esm/components/Card/index.js";
 import { DataList, DataListAction, DataListCell, DataListItem, DataListItemCells, DataListItemRow } from "@patternfly/react-core/dist/esm/components/DataList/index.js";
 import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { Page, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
+import { Stack, StackItem } from "@patternfly/react-core/dist/esm/layouts/Stack/index.js";
+
 import { RebootingIcon } from "@patternfly/react-icons";
 
+import { check_uninstalled_packages } from "packagekit.js";
 import * as PackageKit from "./packagekit.js";
 import { read_os_release } from "os-release.js";
 import { icon_url, show_error, launch, ProgressBar, CancelButton } from "./utils.jsx";
 import { ActionButton } from "./application.jsx";
 import { EmptyStatePanel } from "cockpit-components-empty-state.jsx";
+import { useInit } from "../lib/hooks.js";
 
 const _ = cockpit.gettext;
 
@@ -93,35 +97,65 @@ const ApplicationRow = ({ comp, progress, progress_title, action }) => {
 
 export const ApplicationList = ({ metainfo_db, appProgress, appProgressTitle, action }) => {
     const [progress, setProgress] = useState(false);
+    const [dataPackagesInstalled, setDataPackagesInstalled] = useState(null);
     const comps = [];
     for (const id in metainfo_db.components)
         comps.push(metainfo_db.components[id]);
     comps.sort((a, b) => a.name.localeCompare(b.name));
 
-    function get_config(name, distro_id, def) {
+    function get_config(name, os_release, def) {
+        // ID is a single value, ID_LIKE is a list
+        const os_list = [os_release?.ID || "", ...(os_release?.ID_LIKE || "").split(/\s+/)];
+
         if (cockpit.manifests.apps && cockpit.manifests.apps.config) {
-            let val = cockpit.manifests.apps.config[name];
-            if (typeof val === 'object' && val !== null && !Array.isArray(val))
-                val = val[distro_id];
+            const val = cockpit.manifests.apps.config[name];
+            if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+                for (const os of os_list) {
+                    if (val[os])
+                        return val[os];
+                }
+                return def;
+            }
             return val !== undefined ? val : def;
         } else {
             return def;
         }
     }
 
+    async function check_missing_data(packages) {
+        try {
+            const missing = await check_uninstalled_packages(packages);
+            setDataPackagesInstalled(missing.size === 0);
+        } catch (e) {
+            console.warn("Failed to check missing AppStream metadata packages:", e.toString());
+        }
+    }
+
+    useInit(async () => {
+        const os_release = await read_os_release();
+        const configPackages = get_config('appstream_config_packages', os_release, []);
+        const dataPackages = get_config('appstream_data_packages', os_release, []);
+        await check_missing_data([...dataPackages, ...configPackages]);
+    });
+
     function refresh() {
-        read_os_release().then(os_release =>
+        read_os_release().then(os_release => {
+            const configPackages = get_config('appstream_config_packages', os_release, []);
+            const dataPackages = get_config('appstream_data_packages', os_release, []);
             PackageKit.refresh(metainfo_db.origin_files,
-                               get_config('appstream_config_packages', os_release.ID, []),
-                               get_config('appstream_data_packages', os_release.ID, []),
-                               setProgress))
-                .finally(() => setProgress(false))
-                .catch(show_error);
+                               configPackages,
+                               dataPackages,
+                               setProgress)
+                    .finally(async () => {
+                        await check_missing_data([...dataPackages, ...configPackages]);
+                        setProgress(false);
+                    }).catch(show_error);
+        });
     }
 
     let refresh_progress, refresh_button, tbody;
     if (progress) {
-        refresh_progress = <ProgressBar size="sm" title={_("Checking for new applications")} data={progress} />;
+        refresh_progress = <ProgressBar id="refresh-progress" size="sm" title={_("Checking for new applications")} data={progress} />;
         refresh_button = <CancelButton data={progress} />;
     } else {
         refresh_progress = null;
@@ -139,28 +173,49 @@ export const ApplicationList = ({ metainfo_db, appProgress, appProgressTitle, ac
                                                action={action} />);
     }
 
+    const data_missing_msg = (dataPackagesInstalled == false && !refresh_progress)
+        ? _("Application information is missing")
+        : null;
+
     return (
-        <Page id="list-page">
+        <Page id="list-page" data-packages-checked={dataPackagesInstalled !== null}>
             <PageSection variant={PageSectionVariants.light}>
                 <Flex alignItems={{ default: 'alignItemsCenter' }}>
                     <h2 className="pf-v5-u-font-size-3xl">{_("Applications")}</h2>
                     <FlexItem align={{ default: 'alignRight' }}>
-                        <Flex>
-                            {refresh_progress}
-                            {refresh_button}
+                        <Flex alignItems={{ default: 'alignItemsCenter' }} spacer={{ default: 'spacerXs' }}>
+                            <FlexItem>
+                                {refresh_progress}
+                            </FlexItem>
+                            <FlexItem>
+                                {refresh_button}
+                            </FlexItem>
                         </Flex>
                     </FlexItem>
                 </Flex>
             </PageSection>
             {comps.length == 0
-                ? <EmptyStatePanel title={ _("No applications installed or available.") } />
+                ? <EmptyStatePanel title={ _("No applications installed or available.") }
+                                   paragraph={data_missing_msg}
+                                   action={ data_missing_msg && _("Install application information")} onAction={refresh} />
                 : <PageSection>
-                    <Card>
-                        <DataList aria-label={_("Applications list")}>
-                            { tbody }
-                        </DataList>
-                    </Card>
-                </PageSection>}
+                    <Stack hasGutter>
+                        {!progress && data_missing_msg &&
+                            <StackItem key="missing-meta-alert">
+                                <Alert variant="warning" isInline title={data_missing_msg}
+                                    actionLinks={ <AlertActionLink onClick={refresh}>{_("Install")}</AlertActionLink>} />
+                            </StackItem>
+                        }
+                        <StackItem>
+                            <Card>
+                                <DataList aria-label={_("Applications list")}>
+                                    { tbody }
+                                </DataList>
+                            </Card>
+                        </StackItem>
+                    </Stack>
+                </PageSection>
+            }
         </Page>
     );
 };

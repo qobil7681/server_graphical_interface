@@ -16,11 +16,10 @@ EXTRA_DIST += \
 	$(pixmaps_DATA) \
 	$(NULL)
 
+if ENABLE_PCP
 pcpmanifestdir = $(datadir)/cockpit/pcp
 dist_pcpmanifest_DATA = pkg/pcp/manifest.json
-
-sshmanifestdir = $(datadir)/cockpit/ssh
-dist_sshmanifest_DATA = pkg/ssh/manifest.json
+endif
 
 # one built file in dist/ which we use as dependency
 DIST_STAMP = $(srcdir)/dist/static/manifest.json
@@ -44,7 +43,7 @@ EXTRA_DIST += build.js files.js package.json package-lock.json
 # This is how the qunit tests get included.  We need to prevent automake from
 # seeing them during ./autogen.sh, but need make to find them at compile time.
 # We don't run them in the pybridge case since they're part of `pytest`.
-if !WITH_PYBRIDGE
+if WITH_OLD_BRIDGE
 -include $(wildcard pkg/Makefile.qunit*)
 endif
 

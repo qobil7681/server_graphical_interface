@@ -4,18 +4,20 @@ import json
 import os
 import sys
 import tempfile
+import unittest.mock
+from collections import deque
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Iterable
 
 import pytest
 
-from cockpit._vendor.systemd_ctypes import EventLoopPolicy, bus
+from cockpit._vendor.systemd_ctypes import bus
 from cockpit.bridge import Bridge
+from cockpit.channel import Channel
 from cockpit.channels import CHANNEL_TYPES
+from cockpit.packages import BridgeConfig
 
-from .mocktransport import MOCK_HOSTNAME, MockTransport, settle_down
-
-asyncio.set_event_loop_policy(EventLoopPolicy())
+from .mocktransport import MOCK_HOSTNAME, MockTransport
 
 
 class test_iface(bus.Object):
@@ -28,48 +30,50 @@ class test_iface(bus.Object):
 
 
 @pytest.fixture
-async def bridge() -> Bridge:
+def bridge() -> Bridge:
     bridge = Bridge(argparse.Namespace(privileged=False, beipack=False))
-    # We use this for assertions
-    bridge.superuser_bridges = list(bridge.superuser_rule.bridges)
+    bridge.superuser_bridges = list(bridge.superuser_rule.bridges)  # type: ignore[attr-defined]
     return bridge
 
 
-def add_pseudo(bridge) -> None:
-    bridge.more_superuser_bridges = [*bridge.superuser_bridges, 'pseudo']
+def add_pseudo(bridge: Bridge) -> None:
+    bridge.more_superuser_bridges = [*bridge.superuser_bridges, 'pseudo']  # type: ignore[attr-defined]
+
+    assert bridge.packages is not None
 
     # Add pseudo to the existing set of superuser rules
-    configs = bridge.packages.get_bridge_configs()
-    configs.append({
-        'label': 'pseudo',
-        'spawn': [
-            sys.executable, os.path.abspath(f'{__file__}/../pseudo.py'),
-            sys.executable, '-m', 'cockpit.bridge', '--privileged'
-        ],
-        'environ': [
-            f'PYTHONPATH={":".join(sys.path)}'
-        ],
-        'privileged': True
-    })
-    bridge.superuser_rule.set_configs(configs)
+    bridge.superuser_rule.set_configs([
+        *bridge.packages.get_bridge_configs(),
+        BridgeConfig({
+            'label': 'pseudo',
+            'spawn': [
+                sys.executable, os.path.abspath(f'{__file__}/../pseudo.py'),
+                sys.executable, '-m', 'cockpit.bridge', '--privileged'
+            ],
+            'environ': [
+                f'PYTHONPATH={":".join(sys.path)}'
+            ],
+            'privileged': True
+        })
+    ])
 
 
 @pytest.fixture
-async def no_init_transport(bridge: Bridge) -> MockTransport:
+def no_init_transport(event_loop: asyncio.AbstractEventLoop, bridge: Bridge) -> Iterable[MockTransport]:
     transport = MockTransport(bridge)
     try:
         yield transport
     finally:
-        await transport.stop()
+        transport.stop(event_loop)
 
 
 @pytest.fixture
-async def transport(no_init_transport: MockTransport) -> MockTransport:
-    await no_init_transport.assert_msg('', command='init')
-    no_init_transport.send_init()
+def transport(no_init_transport: MockTransport) -> MockTransport:
+    no_init_transport.init()
     return no_init_transport
 
 
+@pytest.mark.asyncio
 async def test_echo(transport):
     echo = await transport.check_open('echo')
 
@@ -84,6 +88,7 @@ async def test_echo(transport):
     await transport.assert_msg('', command='close', channel=echo)
 
 
+@pytest.mark.asyncio
 async def test_host(transport):
     # try to open a null channel, explicitly naming our host
     await transport.check_open('null', host=MOCK_HOSTNAME)
@@ -104,6 +109,7 @@ async def test_host(transport):
     await transport.check_open('null', host=MOCK_HOSTNAME, superuser=True, problem='access-denied')
 
 
+@pytest.mark.asyncio
 async def test_dbus_call_internal(bridge, transport):
     my_object = test_iface()
     bridge.internal_bus.export('/foo', my_object)
@@ -118,6 +124,7 @@ async def test_dbus_call_internal(bridge, transport):
     assert result == 'none'
 
 
+@pytest.mark.asyncio
 async def test_dbus_watch(bridge, transport):
     my_object = test_iface()
     bridge.internal_bus.export('/foo', my_object)
@@ -154,6 +161,7 @@ async def verify_root_bridge_not_running(bridge, transport):
     assert null not in bridge.open_channels
 
 
+@pytest.mark.asyncio
 async def verify_root_bridge_running(bridge, transport):
     await transport.assert_bus_props('/superuser', 'cockpit.Superuser',
                                      {'Bridges': bridge.more_superuser_bridges, 'Current': 'pseudo'})
@@ -164,12 +172,13 @@ async def verify_root_bridge_running(bridge, transport):
 
     # verify that the bridge thinks that it's the root bridge
     await transport.assert_bus_props('/superuser', 'cockpit.Superuser',
-                                     {'Bridges': bridge.superuser_bridges, 'Current': 'root'}, bus=root_dbus)
+                                     {'Bridges': [], 'Current': 'root'}, bus=root_dbus)
 
     # close up
     await transport.check_close(channel=root_dbus)
 
 
+@pytest.mark.asyncio
 async def test_superuser_dbus(bridge, transport):
     add_pseudo(bridge)
     await verify_root_bridge_not_running(bridge, transport)
@@ -193,14 +202,12 @@ async def test_superuser_dbus(bridge, transport):
     # The Stop method call is done now
     await transport.assert_msg(transport.internal_bus, reply=[[]], id=stop)
 
-    # ...and the process should be gone
-    await settle_down()
-
 
 def format_methods(methods: Dict[str, str]):
     return {name: {'t': 'a{sv}', 'v': {'label': {'t': 's', 'v': label}}} for name, label in methods.items()}
 
 
+@pytest.mark.asyncio
 async def test_superuser_dbus_pw(bridge, transport, monkeypatch):
     monkeypatch.setenv('PSEUDO_PASSWORD', 'p4ssw0rd')
     add_pseudo(bridge)
@@ -235,6 +242,7 @@ async def test_superuser_dbus_pw(bridge, transport, monkeypatch):
     await verify_root_bridge_running(bridge, transport)
 
 
+@pytest.mark.asyncio
 async def test_superuser_dbus_wrong_pw(bridge, transport, monkeypatch):
     monkeypatch.setenv('PSEUDO_PASSWORD', 'p4ssw0rd')
     add_pseudo(bridge)
@@ -270,10 +278,10 @@ async def test_superuser_dbus_wrong_pw(bridge, transport, monkeypatch):
     await verify_root_bridge_not_running(bridge, transport)
 
 
+@pytest.mark.asyncio
 async def test_superuser_init(bridge, no_init_transport):
     add_pseudo(bridge)
-    await no_init_transport.assert_msg('', command='init')
-    no_init_transport.send_init(superuser={"id": "pseudo"})
+    no_init_transport.init(superuser={"id": "pseudo"})
     transport = no_init_transport
 
     # this should work right away without auth
@@ -282,11 +290,11 @@ async def test_superuser_init(bridge, no_init_transport):
     await verify_root_bridge_running(bridge, transport)
 
 
+@pytest.mark.asyncio
 async def test_superuser_init_pw(bridge, no_init_transport, monkeypatch):
     monkeypatch.setenv('PSEUDO_PASSWORD', 'p4ssw0rd')
     add_pseudo(bridge)
-    await no_init_transport.assert_msg('', command='init')
-    no_init_transport.send_init(superuser={"id": "pseudo"})
+    no_init_transport.init(superuser={"id": "pseudo"})
     transport = no_init_transport
 
     msg = await transport.assert_msg('', command='authorize')
@@ -298,6 +306,7 @@ async def test_superuser_init_pw(bridge, no_init_transport, monkeypatch):
     await verify_root_bridge_running(bridge, transport)
 
 
+@pytest.mark.asyncio
 async def test_no_login_messages(transport):
     await transport.check_bus_call('/LoginMessages', 'cockpit.LoginMessages', 'Get', [], ["{}"])
     await transport.check_bus_call('/LoginMessages', 'cockpit.LoginMessages', 'Dismiss', [], [])
@@ -306,6 +315,8 @@ async def test_no_login_messages(transport):
 
 @pytest.fixture
 def login_messages_envvar(monkeypatch):
+    if sys.version_info < (3, 8):
+        pytest.skip("os.memfd_create new in 3.8")
     fd = os.memfd_create('login messages')
     os.write(fd, b"msg")
     # this is questionable (since it relies on ordering of fixtures), but it works
@@ -313,6 +324,7 @@ def login_messages_envvar(monkeypatch):
     return None
 
 
+@pytest.mark.asyncio
 async def test_login_messages(login_messages_envvar, transport):
     del login_messages_envvar
 
@@ -327,6 +339,7 @@ async def test_login_messages(login_messages_envvar, transport):
     await transport.check_bus_call('/LoginMessages', 'cockpit.LoginMessages', 'Get', [], ["{}"])
 
 
+@pytest.mark.asyncio
 async def test_freeze(bridge, transport):
     koelle = await transport.check_open('echo')
     malle = await transport.check_open('echo')
@@ -358,6 +371,7 @@ async def test_freeze(bridge, transport):
     await transport.assert_msg('', command='close', channel=koelle)
 
 
+@pytest.mark.asyncio
 async def test_internal_metrics(transport):
     metrics = [
         {"name": "cpu.core.user", "derive": "rate"},
@@ -374,7 +388,7 @@ async def test_internal_metrics(transport):
     assert meta['interval'] == interval
     assert meta['source'] == source
     assert isinstance(meta['metrics'], list)
-    instances = len([m['instances'] for m in meta['metrics'] if m['name'] == 'cpu.core.user'][0])
+    instances = len(next(m['instances'] for m in meta['metrics'] if m['name'] == 'cpu.core.user'))
 
     # actual data
     _, data = await transport.next_frame()
@@ -387,18 +401,23 @@ async def test_internal_metrics(transport):
     assert isinstance(data[0][1], int)
 
 
+@pytest.mark.asyncio
 async def test_fsread1_errors(transport):
     await transport.check_open('fsread1', path='/etc/shadow', problem='access-denied')
     await transport.check_open('fsread1', path='/', problem='internal-error',
                                reply_keys={'message': "[Errno 21] Is a directory: '/'"})
+    await transport.check_open('fsread1', path='/etc/passwd', max_read_size="lol",
+                               problem='protocol-error',
+                               reply_keys={'message': "attribute 'max_read_size': must have type int"})
 
 
+@pytest.mark.asyncio
 async def test_fslist1_no_watch(transport):
     tempdir = tempfile.TemporaryDirectory()
     dir_path = Path(tempdir.name)
 
     # empty
-    ch = transport.send_open('fslist1', path=str(dir_path), watch=False)
+    ch = await transport.check_open('fslist1', path=str(dir_path), watch=False)
     await transport.assert_msg('', command='done', channel=ch)
     await transport.check_close(channel=ch)
 
@@ -406,7 +425,7 @@ async def test_fslist1_no_watch(transport):
     Path(dir_path, 'somefile').touch()
     Path(dir_path, 'somedir').mkdir()
 
-    ch = transport.send_open('fslist1', path=str(dir_path), watch=False)
+    ch = await transport.check_open('fslist1', path=str(dir_path), watch=False)
     # don't assume any ordering
     msg1 = await transport.next_msg(ch)
     msg2 = await transport.next_msg(ch)
@@ -419,6 +438,7 @@ async def test_fslist1_no_watch(transport):
     await transport.check_close(channel=ch)
 
 
+@pytest.mark.asyncio
 async def test_fslist1_notexist(transport):
     await transport.check_open(
         'fslist1', path='/nonexisting', watch=False,
@@ -428,12 +448,7 @@ async def test_fslist1_notexist(transport):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('channeltype', CHANNEL_TYPES)
-async def test_channel(channeltype, tmp_path):
-    bridge = Bridge(argparse.Namespace(privileged=False, beipack=False))
-    transport = MockTransport(bridge)
-    await transport.assert_msg('', command='init')
-    transport.send_init()
-
+async def test_channel(bridge, transport, channeltype, tmp_path):
     payload = channeltype.payload
     args = dict(channeltype.restrictions)
 
@@ -490,21 +505,11 @@ async def test_channel(channeltype, tmp_path):
             control = json.loads(msg)
             assert control['channel'] == ch
             command = control['command']
-            if command == 'done':
-                saw_data = True
-            elif command == 'ready':
+            if command == 'ready':
                 # If we get ready, it's our turn to send data first.
                 # Hopefully we didn't receive any before.
-                assert isinstance(bridge.open_channels[ch], channeltype)
                 assert not saw_data
                 break
-            elif command == 'close':
-                # If we got an immediate close message then it should be
-                # because the channel sent data and finished, without error.
-                assert 'problem' not in control
-                assert saw_data
-                await settle_down()
-                return
             else:
                 pytest.fail('unexpected event', (payload, args, control))
         else:
@@ -527,5 +532,101 @@ async def test_channel(channeltype, tmp_path):
                 continue
             elif command == 'close':
                 assert 'problem' not in control
-                await settle_down()
                 return
+
+
+@pytest.mark.parametrize(('os_release', 'expected'), [
+    # simple values, with comments and ignored space
+    (
+        '\n\n# simple\nID=mylinux\nVERSION=1.2\n\n# comment\nFOO=bar\n\n',
+        {'ID': 'mylinux', 'VERSION': '1.2', 'FOO': 'bar'}
+    ),
+    # quoted values
+    (
+        '''SINGLE='foo:bar '\nDOUBLE=" bar//foo"\n''',
+        {'SINGLE': 'foo:bar ', 'DOUBLE': ' bar//foo'}
+    ),
+    # ignore ungrammatical lines
+    (
+        'A=a\nNOVALUE\nDOUBLEEQ=a=b\nB=b',
+        {'A': 'a', 'B': 'b'}
+    ),
+    # invalid values; anything outside [A-Za-z0-9] must be quoted; but our parser is more liberal
+    (
+        'X=a:b\nY=a b\nZ=a-b\nV=a_b',
+        {'X': 'a:b', 'Z': 'a-b', 'V': 'a_b'}
+    ),
+])
+def test_get_os_release(os_release, expected):
+    with unittest.mock.patch('builtins.open', unittest.mock.mock_open(read_data=os_release)):
+        assert Bridge.get_os_release() == expected
+
+
+@pytest.mark.asyncio
+async def test_flow_control(transport, tmp_path):
+    bigun = tmp_path / 'bigun'
+    total_bytes = 8 * 1024 * 1024
+    recvd_bytes = 0
+    bigun.write_bytes(b'0' * total_bytes)
+    fsread1 = await transport.check_open('fsread1', path=str(bigun), flow_control=True)
+
+    # We should receive a number of blocks of initial data, each with a ping.
+    # We save the pings to reply later.
+    pings = deque()
+
+    async def recv_one():
+        nonlocal recvd_bytes
+
+        channel, data = await transport.next_frame()
+        assert channel == fsread1
+        assert data == b'0' * Channel.BLOCK_SIZE
+        recvd_bytes += len(data)
+
+        ping = await transport.next_msg('')
+        assert ping['command'] == 'ping'
+        assert ping['channel'] == fsread1
+        assert ping['sequence'] == recvd_bytes
+        pings.append(ping)
+
+    while recvd_bytes < Channel.SEND_WINDOW:
+        await recv_one()
+
+    # We should stall out here.  Make sure nothing else arrives.
+    await transport.assert_empty()
+
+    # Start sending pongs and make sure we receive a new block of data for each
+    # one (as the window extends)
+    while recvd_bytes < total_bytes:
+        ping = pings.popleft()
+        transport.send_json('', **dict(ping, command='pong'))
+        await recv_one()
+
+    transport.send_close(fsread1)
+
+
+@pytest.mark.asyncio
+async def test_large_upload(event_loop, transport, tmp_path):
+    fifo = str(tmp_path / 'pipe')
+    os.mkfifo(fifo)
+
+    sender = await transport.check_open('stream', spawn=['dd', f'of={fifo}'])
+    # cockpit.js doesn't do flow control, so neither do we...
+    chunk = b'0' * Channel.BLOCK_SIZE
+    loops = 100
+    for _ in range(loops):
+        transport.send_data(sender, chunk)
+    transport.send_done(sender)
+
+    # we should be in a state now where we have a bunch of bytes queued up in
+    # the bridge but they can't be delivered because nobody is reading from the
+    # pipe...  make sure dd is still running and we didn't get any messages.
+    await transport.assert_empty()
+
+    # start draining now, and make sure we get everything we sent.
+    with open(fifo, 'rb') as receiver:
+        received = await event_loop.run_in_executor(None, receiver.read)
+        assert len(received) == loops * Channel.BLOCK_SIZE
+
+    # and now our done and close messages should come
+    await transport.assert_msg('', command='done', channel=sender)
+    await transport.assert_msg('', command='close', channel=sender)

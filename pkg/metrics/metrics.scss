@@ -29,6 +29,11 @@ html {
   --resource-icon-color-empty: var(--pf-v5-global--palette--black-400);
   --resource-icon-color-middle: var(--pf-v5-global--palette--orange-500);
   --resource-icon-color-full: var(--pf-v5-global--palette--orange-200);
+
+  // Adjust alert color to seperate itself from the history section background
+  .pf-v5-c-alert {
+    --pf-v5-c-alert--m-inline--m-info--BackgroundColor: var(--pf-v5-global--BackgroundColor--dark-400);
+  }
 }
 
 // Remove doubled-up padding on "main" sections, when two+ sections are used.
@@ -334,6 +339,20 @@ $graphs: cpu, memory, disks, network;
 
   --network-color: var(--pf-v5-chart-color-black-300);
   --network-color-extreme: var(--pf-v5-chart-color-black-400);
+
+  .pf-v5-theme-dark & {
+    --cpu-color: var(--pf-v5-chart-color-purple-500);
+    --cpu-color-extreme: var(--pf-v5-chart-color-purple-300);
+
+    --memory-color: var(--pf-v5-chart-color-green-500);
+    --memory-color-extreme: var(--pf-v5-chart-color-green-400);
+
+    --disks-color: var(--pf-v5-chart-color-gold-500);
+    --disks-color-extreme: var(--pf-v5-chart-color-gold-300);
+
+    --network-color: var(--pf-v5-chart-color-black-400);
+    --network-color-extreme: var(--pf-v5-chart-color-black-300);
+  }
 
   --column-size: 10vw;
   --half-column-size: 8vw;
@@ -730,6 +749,29 @@ $graphs: cpu, memory, disks, network;
     // Aligning percentages to the right, especially when monospaced,
     // makes  it easier to see high percentages
     text-align: end;
+  }
+}
+
+.current-cpu-usage:not(:last-child) {
+  // Bump CPU average above CPU max
+  z-index: 1;
+
+  // Make the background transparent, so CPU max shows through
+  .pf-v5-c-progress__bar {
+    --pf-v5-c-progress__bar--BackgroundColor: transparent;
+    --pf-v5-c-progress__bar--before--Opacity: 0;
+  }
+}
+
+.current-top-cpu-usage {
+  // Nudge max to be at the same place as average
+  margin-block-start: -5px;
+
+  // Lighten up the default bar
+  &:not(.pf-m-danger):not(.pf-m-warning) {
+    .pf-v5-c-progress__indicator {
+      opacity: 0.33;
+    }
   }
 }
 

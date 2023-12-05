@@ -1,7 +1,8 @@
 # Integration Tests of Cockpit
 
-This directory contains automated integration tests for Cockpit, and the support
-files for them.
+This directory contains automated integration tests for Cockpit, and the
+support files for them. The architecture of the automated integration tests is
+described in [ARCHITECTURE](./ARCHITECTURE.md)
 
 To run the tests on Fedora, refer to the [HACKING](../HACKING.md) guide for
 installation of all of the necessary build and test dependencies. There's
@@ -84,10 +85,70 @@ ssh and web.  See the "Helpful tips" section below.
 
 ## Pixel tests
 
-The verify test suite contains ["pixel tests"](https://cockpit-project.org/blog/pixel-testing.html).
-Make sure to create the test/reference submodule before running tests which contain pixel tests.
+Pixel tests in Cockpit ensure that updates of our dependencies or code changes
+don't break the UI: for example slight changes of layout, padding, color and
+everything which isn't easily spotted by a human. They also give us confidence
+that an update of our UI Framework doesn't introduce changes in how Cockpit
+looks.
 
- * test/common/pixel-tests pull
+Pixel tests make a screenshot of a selector and compare it to a known good
+reference image. if there is a difference, the test fails and a pixel
+difference is shown.
+
+This works as our tests run in the [cockpit/tasks container](https://quay.io/repository/cockpit/tasks)
+which pins the browser and font rendering so repeated runs provide the same
+pixels. To generate new pixels, this tasks container must be used; your own
+browser and font rendering software might generate different results. For more
+information read the ["introduction blog post"](https://cockpit-project.org/blog/pixel-testing.html).
+
+The test images are stored in a git submodule in the `test/reference` directory
+and be fetched with:
+
+```sh
+./test/common/pixel-tests update
+```
+
+As Cockpit tests under multiple distributions and it is not worth the effort to
+run pixel tests on every supported distribution we only run them for the
+image configured in `test/reference-image`.
+
+Our tests call `Browser.assert_pixels` at interesting and strategic places.
+This assertion method requires at least a CSS selector and an image title.
+Pixel tests are generated in five layouts by default: desktop, medium, mobile,
+dark and rtl.
+
+Take a screenshot of the content in `#detail-content`:
+```python
+browser.assert_pixels("#detail-content", "filesystem")
+```
+
+Take a screenshot of the content in `#detail-content` and ignore all elements
+with a class `disk-stats` as they change per test run:
+```python
+browser.assert_pixels("#detail-content", "filesystem", ignore=[".disks-stats"])
+```
+
+Take a screenshot of the content in `#detail-content` and skip it for a
+specific layout as it generates unstable pixels:
+```python
+browser.assert_pixels("#detail-content", "filesystem", skip_layouts=["rtl"])
+```
+
+To update pixel tests, locally run the test in the current tasks container, or
+create a draft PR and let the tests run for `test/reference-image` and
+afterwards fetch the new pixels:
+
+```
+./test/common/pixel-tests fetch "https://cockpit-logs.us-east-1.linodeobjects.com/<snip>/log.html"
+```
+
+Finally, upload the new pixel tests and commit the newly generated submodule commit:
+```
+./test/common/pixel-tests push
+```
+
+**Note** that you have to a part of the [Contributors group](https://github.com/orgs/cockpit-project/teams/contributors)
+to push pixel tests.
 
 ## Test Configuration
 
@@ -97,17 +158,17 @@ You can set these environment variables to configure the test suite:
                   "centos-8-stream"
                   "debian-stable"
                   "debian-testing"
-                  "fedora-37"
                   "fedora-38"
+                  "fedora-39"
                   "fedora-coreos"
                   "fedora-testing"
-                  "rhel-8-9"
-                  "rhel-8-9-distropkg"
+                  "rhel-8-10"
+                  "rhel-8-10-distropkg"
                   "rhel-9-3"
                   "rhel4edge",
                   "ubuntu-2204"
                   "ubuntu-stable"
-               "fedora-38" is the default (TEST_OS_DEFAULT in bots/lib/constants.py)
+               "fedora-39" is the default (TEST_OS_DEFAULT in bots/lib/constants.py)
 
     TEST_JOBS  How many tests to run in parallel.  The default is 1.
 
@@ -247,6 +308,31 @@ Still, within a long test, try to have independent sections, where
 each section returns the machine to more or less the state that it was
 in before the section.  This makes it easier to run these sections
 ad-hoc when doing incremental development.
+
+## Coverage
+
+Every pull request will trigger a `$DEFAULT_OS/devel` scenario which creates a
+coverage report of the JavaScript code executed and writes comments about
+uncovered code in the pull request. The overall coverage percentage is recorded
+in prometheus for a subset of our projects and [visualized in Grafana](https://grafana-cockpit.apps.ocp.cloud.ci.centos.org/d/ci/cockpit-ci?orgId=1).
+
+To generate coverage locally for `TestApps`:
+
+```
+export NODE_ENV=devel
+./build.js
+./test/image-prepare -q
+./test/common/run-tests --test-dir test/verify --coverage TestApps
+```
+
+Code which is impossible or very hard to test in our tests can be excluded from
+appearing in a pull request as comment by adding a `not-covered` comment with a
+short justification:
+
+```javascript
+return cockpit.script(data, { superuser: "try", err: "message" })
+              .catch(console.error); // not-covered: OS error
+```
 
 ## Helpful tips
 

@@ -120,7 +120,7 @@ class SELinuxEventDetails extends React.Component {
 
             // One line usually means one command
             if (itm.doText && itm.doText.indexOf("\n") < 0)
-                doElement = <TextArea aria-label={_("solution")} isReadOnly defaultValue={itm.doText} />;
+                doElement = <TextArea aria-label={_("solution")} readOnlyVariant="default" defaultValue={itm.doText} />;
 
             // There can be text with commands. Command always starts on a new line with '#'
             // Group subsequent commands into one `<TextArea>` element.
@@ -142,7 +142,7 @@ class SELinuxEventDetails extends React.Component {
                 });
                 doElement = parts.map((p, index) => p[0] == "#"
                     ? <TextArea aria-label={_("solution")}
-                                isReadOnly
+                                readOnlyVariant="plain"
                                 key={p}
                                 defaultValue={p.substr(2)} />
                     : <span key={p}>{p}</span>);
@@ -256,7 +256,7 @@ class SELinuxStatus extends React.Component {
 
         return (
             <Stack hasGutter className="selinux-policy-ct">
-                <Flex alignItems={{ default: 'alignItemsCenter' }}>
+                <Flex spaceItems={{ default: 'spaceItemsMd' }} alignItems={{ default: 'alignItemsCenter' }}>
                     <h2>{_("SELinux policy")}</h2>
                     <Switch isChecked={this.props.selinuxStatus.enforcing}
                             label={_("Enforcing")}
@@ -427,7 +427,7 @@ export class SETroubleshootPage extends React.Component {
                 shell={ "semanage import <<EOF\n" + this.props.selinuxStatus.shell.trim() + "\nEOF" }
                 ansible={ this.props.selinuxStatus.ansible }
                 entries={ this.props.selinuxStatus.modifications }
-                failed={ this.props.selinuxStatus.failed }
+                failed={this.props.selinuxStatus.failed ? _("Error running semanage to discover system modifications") : null}
             />
         );
 

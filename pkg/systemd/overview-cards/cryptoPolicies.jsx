@@ -34,7 +34,7 @@ import "./cryptoPolicies.scss";
 
 const _ = cockpit.gettext;
 
-const displayProfileText = profile => profile === "FIPS" ? profile : profile.charAt(0) + profile.slice(1, profile.length).toLowerCase();
+const displayProfileText = profile => profile === "DEFAULT" ? _("Default") : profile;
 const isInconsistentPolicy = (policy, fipsEnabled) => policy === "FIPS" !== fipsEnabled;
 
 export const CryptoPolicyRow = () => {
@@ -58,9 +58,9 @@ export const CryptoPolicyRow = () => {
     }
 
     return (
-        <tr>
-            <th scope="row">{_("Cryptographic policy")}</th>
-            <td>
+        <tr className="pf-v5-c-table__tr">
+            <th className="pf-v5-c-table__th" scope="row">{_("Cryptographic policy")}</th>
+            <td className="pf-v5-c-table__td">
                 <PrivilegedButton variant="link" buttonId="crypto-policy-button" tooltipId="tip-crypto-policy"
                                   excuse={ _("The user $0 is not permitted to change cryptographic policies") }
                                   onClick={() => Dialogs.show(<CryptoPolicyDialog

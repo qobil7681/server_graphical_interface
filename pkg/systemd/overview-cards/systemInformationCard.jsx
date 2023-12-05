@@ -28,13 +28,16 @@ import "./systemInformationCard.scss";
 
 const _ = cockpit.gettext;
 
-export class SystemInfomationCard extends React.Component {
+export class SystemInformationCard extends React.Component {
     constructor(props) {
         super(props);
 
-        this.state = {};
-        this.getDMIInfo = this.getDMIInfo.bind(this);
-        this.getMachineId = this.getMachineId.bind(this);
+        this.state = {
+            machineID: null,
+            model: null,
+            assetTag: null,
+            systemUptime: null,
+        };
         this.getSystemUptime = this.getSystemUptime.bind(this);
     }
 
@@ -47,29 +50,19 @@ export class SystemInfomationCard extends React.Component {
     }
 
     componentWillUnmount() {
-        clearInterval(this.uptimeTimer);
+        clearInterval(this.uptimeTimer); // not-covered: callers currently never unmount this
     }
 
     getMachineId() {
         const machine_id = cockpit.file("/etc/machine-id");
-        const self = this;
 
         machine_id.read()
-                .done(function(content) {
-                    self.setState({ machineID: content });
-                })
-                .fail(function(ex) {
-                    // FIXME show proper Alerts
-                    console.error("Error reading machine id", ex);
-                })
-                .always(function() {
-                    machine_id.close();
-                });
+                .then(machineID => this.setState({ machineID }))
+                .catch(ex => console.error("Error reading machine id", ex.toString())) // not-covered: OS error
+                .finally(machine_id.close);
     }
 
     getDMIInfo() {
-        const self = this;
-
         machine_info.dmi_info()
                 .then(fields => {
                     let vendor = fields.sys_vendor;
@@ -79,20 +72,20 @@ export class SystemInfomationCard extends React.Component {
                         name = fields.board_name;
                     }
                     if (!vendor || !name)
-                        self.setState({ hardwareText: undefined });
+                        this.setState({ model: null });
                     else
-                        self.setState({ hardwareText: vendor + " " + name });
+                        this.setState({ model: vendor + " " + name });
 
-                    self.setState({ assetTagText: fields.product_serial || fields.chassis_serial || undefined });
+                    this.setState({ assetTag: fields.product_serial || fields.chassis_serial });
                 })
                 .catch(ex => {
                     // try DeviceTree
-                    machine_info.devicetree_info()
-                            .then(fields => self.setState({ assetTagText: fields.serial, hardwareText: fields.model || undefined }))
+                    machine_info.devicetree_info() // not-covered: coverage only runs on x86_64
+                            .then(fields => this.setState({ assetTag: fields.serial, model: fields.model }))
                             .catch(dmiex => {
-                                console.debug("couldn't read dmi info: " + ex);
+                                console.debug("couldn't read dmi info: " + ex.toString());
                                 console.debug("couldn't read DeviceTree info: " + dmiex.toString());
-                                self.setState({ assetTagText: undefined, hardwareText: undefined });
+                                this.setState({ assetTag: null, model: null });
                             });
                 });
     }
@@ -104,7 +97,7 @@ export class SystemInfomationCard extends React.Component {
                     const bootTime = new Date().valueOf() - uptime * 1000;
                     this.setState({ systemUptime: timeformat.distanceToNow(bootTime) });
                 })
-                .fail(ex => console.error("Error reading system uptime", ex));
+                .catch(ex => console.error("Error reading system uptime", ex.toString())); // not-covered: OS error
     }
 
     render() {
@@ -113,28 +106,28 @@ export class SystemInfomationCard extends React.Component {
                 <CardTitle>{_("System information")}</CardTitle>
                 <CardBody>
                     <table className="pf-v5-c-table pf-m-grid-md pf-m-compact">
-                        <tbody>
-                            {this.state.hardwareText && <tr>
-                                <th scope="row">{_("Model")}</th>
-                                <td>
-                                    <div id="system_information_hardware_text">{this.state.hardwareText}</div>
+                        <tbody className="pf-v5-c-table__tbody">
+                            {this.state.model && <tr className="pf-v5-c-table__tr">
+                                <th className="pf-v5-c-table__th" scope="row">{_("Model")}</th>
+                                <td className="pf-v5-c-table__td">
+                                    <div id="system_information_hardware_text">{this.state.model}</div>
                                 </td>
                             </tr>}
-                            {this.state.assetTagText && <tr>
-                                <th scope="row">{_("Asset tag")}</th>
-                                <td>
-                                    <div id="system_information_asset_tag_text">{this.state.assetTagText}</div>
+                            {this.state.assetTag && <tr className="pf-v5-c-table__tr">
+                                <th className="pf-v5-c-table__th" scope="row">{_("Asset tag")}</th>
+                                <td className="pf-v5-c-table__td">
+                                    <div id="system_information_asset_tag_text">{this.state.assetTag}</div>
                                 </td>
                             </tr>}
-                            <tr>
-                                <th scope="row" className="system-information-machine-id">{_("Machine ID")}</th>
-                                <td>
+                            <tr className="pf-v5-c-table__tr">
+                                <th className="pf-v5-c-table__th system-information-machine-id" scope="row">{_("Machine ID")}</th>
+                                <td className="pf-v5-c-table__td">
                                     <div id="system_machine_id">{this.state.machineID}</div>
                                 </td>
                             </tr>
-                            <tr>
-                                <th scope="row" className="system-information-uptime">{_("Uptime")}</th>
-                                <td>
+                            <tr className="pf-v5-c-table__tr">
+                                <th className="pf-v5-c-table__th system-information-uptime" scope="row">{_("Uptime")}</th>
+                                <td className="pf-v5-c-table__td">
                                     <div id="system_uptime">{this.state.systemUptime}</div>
                                 </td>
                             </tr>

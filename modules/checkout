@@ -1,6 +1,0 @@
-#!/bin/sh
-
-set -eu
-cd "${0%/*}/.."
-
-git submodule update --init --checkout 'modules/*'

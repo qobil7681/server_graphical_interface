@@ -34,7 +34,7 @@ import { journal } from "journal";
 
 const _ = cockpit.gettext;
 
-const Table = ({ lines, delimiter, type }) => {
+const Table = ({ lines, delimiter }) => {
     return (
         <DescriptionList className="pf-m-horizontal-on-sm">
             { lines.map((line, idx) => {
@@ -216,8 +216,9 @@ export class AbrtLogDetails extends React.Component {
         this.renderBacktrace = this.renderBacktrace.bind(this);
     }
 
-    componentDidMount() {
-        this.props.service.GetProblemData(this.props.problem.path).done(details => this.setState({ details }));
+    async componentDidMount() {
+        const details = await this.props.service.GetProblemData(this.props.problem.path);
+        this.setState({ details });
     }
 
     handleSelect(event, active_tab) {

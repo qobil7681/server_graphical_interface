@@ -18,6 +18,7 @@
 # along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
 
 import base64
+import json
 import os
 import subprocess
 import time
@@ -217,6 +218,7 @@ class TestConnection(testlib.MachineCase):
                 self.assertEqual(count, https_instances, out)
 
         # at the beginning, no cockpit related units are running
+        m.execute("systemctl reset-failed")
         m.stop_cockpit()
         expect_actives(ws_socket=False, instance_sockets=False, http_instances=[])
 
@@ -301,6 +303,7 @@ class TestConnection(testlib.MachineCase):
         orig = m.execute("cat /proc/sys/kernel/core_pattern").strip()
         m.execute("echo core > /proc/sys/kernel/core_pattern")
         self.addCleanup(m.execute, f"echo '{orig}' > /proc/sys/kernel/core_pattern")
+        self.addCleanup(m.execute, "systemctl reset-failed")
         m.start_cockpit(tls=True)
 
         # some netcat versions need an explicit shutdown option, others default to shutting down and don't have -N
@@ -437,9 +440,33 @@ class TestConnection(testlib.MachineCase):
         m.execute("curl -k -c cockpit.jar -s --head --header 'Authorization: Basic {}' https://127.0.0.1:9090/cockpit/login".format(
             base64.b64encode(b"admin:foobar").decode(), ))
         headers = m.execute("curl -k --head -b cockpit.jar -s https://127.0.0.1:9090/")
-        self.assertIn(
-            "default-src 'self' https://127.0.0.1:9090; connect-src 'self' https://127.0.0.1:9090 wss://127.0.0.1:9090", headers)
-        self.assertIn("Access-Control-Allow-Origin: https://127.0.0.1:9090", headers)
+
+        # https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/connect-src
+        #
+        #    Note: connect-src 'self' does not resolve to websocket
+        #    schemes in all browsers, more info in this issue.
+        #
+        # https://github.com/w3c/webappsec-csp/issues/7
+        #
+        # Make sure we send the explicit `wss://` item until we're absolutely
+        # sure about the browser support situation for `connect-src 'self';`.
+        self.assertIn("wss://127.0.0.1:9090", headers)
+
+        if self.is_pybridge():
+            # We want to make sure we're *not* sending any CORS headers.
+            CORS_HEADERS = [
+                # https://en.wikipedia.org/wiki/Cross-origin_resource_sharing#Response_headers
+                'Access-Control-Allow-Credentials',
+                'Access-Control-Expose-Headers',
+                'Access-Control-Max-Age',
+                'Access-Control-Allow-Methods',
+                'Access-Control-Allow-Headers',
+            ]
+            for cors_header in CORS_HEADERS:
+                self.assertNotIn(cors_header, headers)
+        else:
+            self.assertIn("Access-Control-Allow-Origin: https://127.0.0.1:9090", headers)
+
         # CORP and Frame-Options are also set for dynamic paths
         self.assertIn("Cross-Origin-Resource-Policy: same-origin", headers)
         self.assertIn("X-Frame-Options: sameorigin", headers)
@@ -578,7 +605,7 @@ class TestConnection(testlib.MachineCase):
 
         def checkMotdContent(string, expected=True):
             # Needs https://github.com/linux-pam/linux-pam/pull/292 (or PAM 1.5.0)
-            old_pam = (m.image in ['centos-8-stream', 'ubuntu-2204', 'rhel-8-7', 'rhel-8-8', 'rhel-8-9'])
+            old_pam = m.image.startswith('rhel-8-') or m.image in ['centos-8-stream', 'ubuntu-2204']
 
             # check issue (should be exactly the same as motd)
             assertInOrNot(string, m.execute("cat /etc/issue.d/cockpit.issue"), expected)
@@ -669,9 +696,12 @@ class TestConnection(testlib.MachineCase):
         install()
         self.assertIn('Activate the web console', m.execute("cat /etc/motd.d/cockpit"))
         self.assertIn('Activate the web console', m.execute("cat /etc/issue.d/cockpit.issue"))
-        # disallowed-users should not exists now as this is an upgrade
-        m.execute("test ! -e /etc/cockpit/disallowed-users")
-        m.execute("echo 'root' > /etc/cockpit/disallowed-users")
+        # disallowed-users should not exists now as this is an upgrade, except on Arch
+        if m.image != "arch":
+            m.execute("test ! -e /etc/cockpit/disallowed-users")
+            m.execute("echo 'root' > /etc/cockpit/disallowed-users")
+        else:
+            m.execute("test -e /etc/cockpit/disallowed-users")
 
         # HACK: On Arch Linux the symlink is overwritten, bug?
         if m.image != "arch":
@@ -769,17 +799,11 @@ class TestConnection(testlib.MachineCase):
 
     @testlib.skipOstree("ssh root login not allowed")
     @testlib.nondestructive
-    def testFlowControl(self):
+    def testFlowControlDownload(self):
         m = self.machine
         b = self.browser
 
         self.login_and_go("/playground/speed", user="root", enable_root_login=True)
-
-        # Check the speed playground page
-        b.switch_to_top()
-        b.go("/playground/speed")
-        b.enter_page("/playground/speed")
-
         b.wait_text_not("#pid", "")
         pid = b.text("#pid")
 
@@ -793,6 +817,23 @@ class TestConnection(testlib.MachineCase):
 
         # This fails when flow control is not present
         self.assertLess(rss, 250000)
+
+    @testlib.nondestructive
+    @testlib.skipImage("Broken with C bridge", "centos-8-stream", "rhel-8*")
+    def testFlowControlUpload(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/playground/speed")
+        self.addCleanup(m.execute, "rm -f /tmp/spawninput")
+        b.click("#spawn-input")
+
+        b.wait_text_not("#speed", "")
+        with b.wait_timeout(60):
+            b.wait_text("#spawn-input-result", "success")
+
+        self.assertEqual(int(m.execute("stat -c %s /tmp/spawninput")), 65536000)
+        self.assertEqual(m.execute("tail -c10 /tmp/spawninput").strip(), "a" * 10)
 
     @testlib.skipOstree("OSTree doesn't have cockpit-ws")
     @testlib.nondestructive
@@ -858,7 +899,7 @@ export XDG_CONFIG_DIRS=/usr/local
                  ]
 
         # prepare fake ssh target; to verify that we really use that, fake dashboard manifest
-        m.execute("""set -e; useradd test1
+        m.execute("""useradd test1
                   [ -f ~admin/.ssh/id_rsa ] || su -c "ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa" admin
                   mkdir -p ~test1/.ssh ~test1/.local/share/cockpit/dashboard
                   echo '{ "version": "42", "dashboard": { "index": { "label": "HACK" } } }' > ~test1/.local/share/cockpit/dashboard/manifest.json
@@ -1148,6 +1189,32 @@ UnixPath=/run/cockpit/session
         self.login_and_go(None)
         b.wait_visible("#nav-system li:contains(Hackices)")
         self.assertFalse(b.is_present("#nav-system li:contains(Services)"))
+
+    def testBridgeCLI(self):
+        m = self.machine
+
+        out = m.execute("cockpit-bridge --help")
+        # this needs to work with both the C and Python bridges
+        self.assertRegex(out, r"[uU]sage:")
+        self.assertIn("--packages", out)
+
+        version = m.execute("cockpit-bridge --version")
+        self.assertIn("Protocol: 1", version)
+        self.assertRegex(version, r"Version: \d{3,}")
+
+        packages = m.execute("cockpit-bridge --packages")
+        self.assertRegex(packages, r"(^|\n)base1\s+.*/usr/share/cockpit/base1")
+        self.assertRegex(packages, r"(^|\n)system\s+.*/usr/share/cockpit/systemd")
+
+        if self.is_pybridge():
+            bridges = json.loads(m.execute("cockpit-bridge --bridges").strip())
+            bridge_names = [b['name'] for b in bridges]
+            self.assertGreater(len(bridges), 0)
+            self.assertIn('sudo', bridge_names)
+
+            # OStree has no PCP bridge
+            if not m.ostree_image:
+                self.assertIn(f'{self.libexecdir}/cockpit-pcp', bridge_names)
 
 
 @testlib.skipDistroPackage()

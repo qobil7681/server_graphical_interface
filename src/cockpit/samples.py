@@ -15,6 +15,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import errno
+import logging
 import os
 import re
 from typing import Any, DefaultDict, Iterable, List, NamedTuple, Optional, Tuple
@@ -29,6 +31,8 @@ HWMON_PATH = '/sys/class/hwmon'
 # Samples = collections.defaultdict[str, Union[float, Dict[str, Union[float, None]]]]
 Samples = DefaultDict[str, Any]
 
+logger = logging.getLogger(__name__)
+
 
 def read_int_file(rootfd: int, statfile: str, default: Optional[int] = None, key: bytes = b'') -> Optional[int]:
     # Not every stat is available, such as cpu.weight
@@ -39,6 +43,11 @@ def read_int_file(rootfd: int, statfile: str, default: Optional[int] = None, key
 
     try:
         data = os.read(fd, 1024)
+    except OSError as e:
+        # cgroups can disappear between the open and read
+        if e.errno != errno.ENODEV:
+            logger.warning('Failed to read %s: %s', statfile, e)
+        return None
     finally:
         os.close(fd)
 
@@ -148,8 +157,7 @@ class CPUTemperatureSampler(Sampler):
             # accept all labels on Intel
             predicate = None
         elif name in ['k8temp', 'k10temp']:
-            # ignore Tctl on AMD devices
-            predicate = (lambda label: label != 'Tctl')
+            predicate = None
         else:
             # Not a CPU sensor
             return
@@ -387,12 +395,14 @@ class MountSampler(Sampler):
                     continue
 
                 path = line.split()[1]
-                res = os.statvfs(path)
-                if res:
-                    frsize = res.f_frsize
-                    total = frsize * res.f_blocks
-                    samples['mount.total'][path] = total
-                    samples['mount.used'][path] = total - frsize * res.f_bfree
+                try:
+                    res = os.statvfs(path)
+                except OSError:
+                    continue
+                frsize = res.f_frsize
+                total = frsize * res.f_blocks
+                samples['mount.total'][path] = total
+                samples['mount.used'][path] = total - frsize * res.f_bfree
 
 
 class BlockSampler(Sampler):

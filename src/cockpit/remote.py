@@ -15,7 +15,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import asyncio
 import getpass
 import logging
 import re
@@ -24,13 +23,14 @@ from typing import Dict, List, Optional, Tuple
 
 from cockpit._vendor import ferny
 
+from .jsonutil import JsonDocument, JsonObject, get_str, get_str_or_none
 from .peer import Peer, PeerError
 from .router import Router, RoutingRule
 
 logger = logging.getLogger(__name__)
 
 
-class PasswordResponder(ferny.InteractionResponder):
+class PasswordResponder(ferny.AskpassHandler):
     PASSPHRASE_RE = re.compile(r"Enter passphrase for key '(.*)': ")
 
     password: Optional[str]
@@ -76,7 +76,7 @@ class SshPeer(Peer):
     password: Optional[str]
     private: bool
 
-    async def do_connect_transport(self) -> asyncio.Transport:
+    async def do_connect_transport(self) -> None:
         assert self.session is not None
         logger.debug('Starting ssh session user=%s, host=%s, private=%s', self.user, self.host, self.private)
 
@@ -104,17 +104,17 @@ class SshPeer(Peer):
             logger.debug('connecting to host %s failed: %s', host, exc)
             raise PeerError('no-host', error='no-host', message=str(exc)) from exc
 
-        except ferny.HostKeyError as exc:
+        except ferny.SshHostKeyError as exc:
             if responder.hostkeys_seen:
                 # If we saw a hostkey then we can issue a detailed error message
                 # containing the key that would need to be accepted.  That will
                 # cause the front-end to present a dialog.
                 _reason, host, algorithm, key, fingerprint = responder.hostkeys_seen[0]
-                error_args = {'host_key': f'{host} {algorithm} {key}', 'host_fingerprint': fingerprint}
+                error_args: JsonObject = {'host-key': f'{host} {algorithm} {key}', 'host-fingerprint': fingerprint}
             else:
                 error_args = {}
 
-            if isinstance(exc, ferny.ChangedHostKeyError):
+            if isinstance(exc, ferny.SshChangedHostKeyError):
                 error = 'invalid-hostkey'
             elif self.private:
                 error = 'unknown-hostkey'
@@ -124,12 +124,12 @@ class SshPeer(Peer):
 
             logger.debug('SshPeer got a %s %s; private %s, seen hostkeys %r; raising %s with extra args %r',
                          type(exc), exc, self.private, responder.hostkeys_seen, error, error_args)
-            raise PeerError(error, error=error, auth_method_results={}, **error_args) from exc
+            raise PeerError(error, error_args, error=error, auth_method_results={}) from exc
 
-        except ferny.AuthenticationError as exc:
+        except ferny.SshAuthenticationError as exc:
             logger.debug('authentication to host %s failed: %s', host, exc)
 
-            results = {method: 'not-provided' for method in exc.methods}
+            results: JsonObject = {method: 'not-provided' for method in exc.methods}
             if 'password' in results and self.password is not None:
                 if responder.password_attempts == 0:
                     results['password'] = 'not-tried'
@@ -145,7 +145,7 @@ class SshPeer(Peer):
             raise PeerError('internal-error', message=str(exc)) from exc
 
         args = self.session.wrap_subprocess_args(['cockpit-bridge'])
-        return await self.spawn(args, [])
+        await self.spawn(args, [])
 
     def do_kill(self, host: Optional[str], group: Optional[str]) -> None:
         if host == self.host:
@@ -153,15 +153,32 @@ class SshPeer(Peer):
         elif host is None:
             super().do_kill(None, group)
 
-    def __init__(self, router: Router, host: str, user: Optional[str], password: Optional[str], *, private: bool):
+    def do_authorize(self, message: JsonObject) -> None:
+        if get_str(message, 'challenge').startswith('plain1:'):
+            cookie = get_str(message, 'cookie')
+            self.write_control(command='authorize', cookie=cookie, response=self.password or '')
+            self.password = None  # once is enough...
+
+    def do_superuser_init_done(self) -> None:
+        self.password = None
+
+    def __init__(self, router: Router, host: str, user: Optional[str], options: JsonObject, *, private: bool) -> None:
         super().__init__(router)
         self.host = host
         self.user = user
-        self.password = password
+        self.password = get_str(options, 'password', None)
         self.private = private
 
         self.session = ferny.Session()
-        self.start_in_background(init_host=host)
+
+        superuser: JsonDocument
+        init_superuser = get_str_or_none(options, 'init-superuser', None)
+        if init_superuser in (None, 'none'):
+            superuser = False
+        else:
+            superuser = {'id': init_superuser}
+
+        self.start_in_background(init_host=host, superuser=superuser)
 
 
 class HostRoutingRule(RoutingRule):
@@ -171,17 +188,15 @@ class HostRoutingRule(RoutingRule):
         super().__init__(router)
         self.remotes = {}
 
-    def apply_rule(self, options: Dict[str, object]) -> Optional[Peer]:
+    def apply_rule(self, options: JsonObject) -> Optional[Peer]:
         assert self.router is not None
+        assert self.router.init_host is not None
 
-        host = options.get('host')
-
-        if host is None or host == self.router.init_host:
+        host = get_str(options, 'host', self.router.init_host)
+        if host == self.router.init_host:
             return None
 
-        assert isinstance(host, str)
-
-        user = options.get('user')
+        user = get_str(options, 'user', None)
         # HACK: the front-end relies on this for tracking connections without an explicit user name;
         # the user will then be determined by SSH (`User` in the config or the current user)
         # See cockpit_router_normalize_host_params() in src/bridge/cockpitrouter.c
@@ -191,8 +206,8 @@ class HostRoutingRule(RoutingRule):
             user_from_host, _, _ = host.rpartition('@')
             user = user_from_host or None  # avoid ''
 
-        if options.get('session') == 'private':
-            nonce = options.get('channel')
+        if get_str(options, 'session', None) == 'private':
+            nonce = get_str(options, 'channel')
         else:
             nonce = None
 
@@ -207,9 +222,7 @@ class HostRoutingRule(RoutingRule):
 
         if key not in self.remotes:
             logger.debug('%s is not among the existing remotes %s.  Opening a new connection.', key, self.remotes)
-            password = options.get('password')
-            assert password is None or isinstance(password, str)
-            peer = SshPeer(self.router, host, user, password, private=nonce is not None)
+            peer = SshPeer(self.router, host, user, options, private=nonce is not None)
             peer.add_done_callback(lambda: self.remotes.__delitem__(key))
             self.remotes[key] = peer
 

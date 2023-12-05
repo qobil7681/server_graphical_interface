@@ -44,23 +44,25 @@ function get_plural_expr(statement) {
     return expr;
 }
 
-function buildFile(po_file, subdir, webpack_module, webpack_compilation) {
-    if (webpack_compilation)
-        webpack_compilation.fileDependencies.add(po_file);
-
+function buildFile(po_file, subdir, webpack_module, webpack_compilation, filename, filter) {
     return new Promise((resolve, reject) => {
-        const parsed = gettext_parser.po.parse(fs.readFileSync(po_file), 'utf8');
+        // Read the PO file, remove fuzzy/disabled lines to avoid tripping up the validator
+        const po_data = fs.readFileSync(po_file, 'utf8')
+                .split('\n')
+                .filter(line => !line.startsWith('#~'))
+                .join('\n');
+        const parsed = gettext_parser.po.parse(po_data, { defaultCharset: 'utf8', validation: true });
         delete parsed.translations[""][""]; // second header copy
 
         const rtl_langs = ["ar", "fa", "he", "ur"];
-        const dir = rtl_langs.includes(parsed.headers.language) ? "rtl" : "ltr";
+        const dir = rtl_langs.includes(parsed.headers.Language) ? "rtl" : "ltr";
 
         // cockpit.js only looks at "plural-forms" and "language"
         const chunks = [
             '{\n',
             ' "": {\n',
-            `  "plural-forms": ${get_plural_expr(parsed.headers['plural-forms'])},\n`,
-            `  "language": "${parsed.headers.language}",\n`,
+            `  "plural-forms": ${get_plural_expr(parsed.headers['Plural-Forms'])},\n`,
+            `  "language": "${parsed.headers.Language}",\n`,
             `  "language-direction": "${dir}"\n`,
             ' }'
         ];
@@ -74,6 +76,9 @@ function buildFile(po_file, subdir, webpack_module, webpack_compilation) {
                     continue;
 
                 if (translation.comments.flag?.match(/\bfuzzy\b/))
+                    continue;
+
+                if (!references.some(filter))
                     continue;
 
                 const key = JSON.stringify(context_prefix + msgid);
@@ -90,8 +95,7 @@ function buildFile(po_file, subdir, webpack_module, webpack_compilation) {
         const wrapper = config.wrapper?.(subdir) || DEFAULT_WRAPPER;
         const output = wrapper.replace('PO_DATA', chunks.join('')) + '\n';
 
-        const lang = path.basename(po_file).slice(0, -3);
-        const out_path = (subdir ? (subdir + '/') : '') + 'po.' + lang + '.js';
+        const out_path = path.join(subdir ? (subdir + '/') : '', filename);
         if (webpack_compilation)
             webpack_compilation.emitAsset(out_path, new webpack_module.sources.RawSource(output));
         else
@@ -110,9 +114,20 @@ function init(options) {
 
 function run(webpack_module, webpack_compilation) {
     const promises = [];
-    config.subdirs.map(subdir =>
-        promises.push(...get_po_files().map(po_file =>
-            buildFile(po_file, subdir, webpack_module, webpack_compilation))));
+    for (const subdir of config.subdirs) {
+        for (const po_file of get_po_files()) {
+            if (webpack_compilation)
+                webpack_compilation.fileDependencies.add(po_file);
+            const lang = path.basename(po_file).slice(0, -3);
+            promises.push(Promise.all([
+                // Separate translations for the manifest.json file and normal pages
+                buildFile(po_file, subdir, webpack_module, webpack_compilation,
+                          `po.${lang}.js`, str => !str.includes('manifest.json')),
+                buildFile(po_file, subdir, webpack_module, webpack_compilation,
+                          `po.manifest.${lang}.js`, str => str.includes('manifest.json'))
+            ]));
+        }
+    }
     return Promise.all(promises);
 }
 

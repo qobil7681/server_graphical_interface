@@ -114,7 +114,7 @@ class cockpit_Machines(bus.Object):
 
         # avoid a flurry of update notifications
         if self.pending_notify is None:
-            self.pending_notify = self.loop.call_later(1.0, _notify_now)
+            self.pending_notify = asyncio.get_running_loop().call_later(1.0, _notify_now)
 
     # inotify events
     def do_inotify_event(self, mask: inotify.Event, cookie: int, name: Optional[str]) -> None:
@@ -124,8 +124,7 @@ class cockpit_Machines(bus.Object):
         self.notify()
 
     def __init__(self):
-        self.path = config.lookup_config('/machines.d')
-        self.loop = asyncio.get_running_loop()
+        self.path = config.lookup_config('machines.d')
 
         # ignore the first callback
         self.pending_notify = ...

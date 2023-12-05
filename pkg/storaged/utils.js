@@ -47,6 +47,88 @@ export function compare_versions(a, b) {
     return a_ints.length - b_ints.length;
 }
 
+export function parse_options(options) {
+    if (options)
+        return (options.split(",")
+                .map(function (s) { return s.trim() })
+                .filter(function (s) { return s != "" }));
+    else
+        return [];
+}
+
+export function unparse_options(split) {
+    return split.join(",");
+}
+
+export function extract_option(split, opt) {
+    const index = split.indexOf(opt);
+    if (index >= 0) {
+        split.splice(index, 1);
+        return true;
+    } else {
+        return false;
+    }
+}
+
+export function edit_crypto_config(block, modify) {
+    let old_config, new_config;
+
+    function commit() {
+        new_config[1]["track-parents"] = { t: 'b', v: true };
+        if (old_config)
+            return block.UpdateConfigurationItem(old_config, new_config, { });
+        else
+            return block.AddConfigurationItem(new_config, { });
+    }
+
+    return block.GetSecretConfiguration({}).then(
+        function (items) {
+            old_config = items.find(c => c[0] == "crypttab");
+            new_config = ["crypttab", old_config ? Object.assign({ }, old_config[1]) : { }];
+
+            // UDisks insists on always having a "passphrase-contents" field when
+            // adding a crypttab entry, but doesn't include one itself when returning
+            // an entry without a stored passphrase.
+            //
+            if (!new_config[1]['passphrase-contents'])
+                new_config[1]['passphrase-contents'] = { t: 'ay', v: encode_filename("") };
+
+            return modify(new_config[1], commit);
+        });
+}
+
+export function set_crypto_options(block, readonly, auto, nofail, netdev) {
+    return edit_crypto_config(block, (config, commit) => {
+        const opts = config.options ? parse_options(decode_filename(config.options.v)) : [];
+        if (readonly !== null) {
+            extract_option(opts, "readonly");
+            if (readonly)
+                opts.push("readonly");
+        }
+        if (auto !== null) {
+            extract_option(opts, "noauto");
+            if (!auto)
+                opts.push("noauto");
+        }
+        if (nofail !== null) {
+            extract_option(opts, "nofail");
+            if (nofail)
+                opts.push("nofail");
+        }
+        if (netdev !== null) {
+            extract_option(opts, "_netdev");
+            if (netdev)
+                opts.push("_netdev");
+        }
+        config.options = { t: 'ay', v: encode_filename(unparse_options(opts)) };
+        return commit();
+    });
+}
+
+export function set_crypto_auto_option(block, flag) {
+    return set_crypto_options(block, null, flag, null, null);
+}
+
 export let hostnamed = cockpit.dbus("org.freedesktop.hostname1").proxy();
 
 // for unit tests
@@ -75,6 +157,11 @@ export function decode_filename(encoded) {
 export function encode_filename(decoded) {
     return cockpit.base64_encode(cockpit.utf8_encoder().encode(decoded)
             .concat([0]));
+}
+
+export function get_block_mntopts(config) {
+    // treat an absent field as "default", like util-linux
+    return (config.opts ? decode_filename(config.opts.v) : "defaults");
 }
 
 export function fmt_size(bytes) {
@@ -140,6 +227,7 @@ export function validate_fsys_label(label, type) {
         ext4: 16,
         vfat: 11,
         ntfs: 128,
+        btrfs: 256,
     };
 
     const limit = fs_label_max[type.replace("luks+", "")];
@@ -156,6 +244,10 @@ export function validate_fsys_label(label, type) {
 
 export function block_name(block) {
     return decode_filename(block.PreferredDevice);
+}
+
+export function block_short_name(block) {
+    return block_name(block).replace(/^\/dev\//, "");
 }
 
 export function mdraid_name(mdraid) {
@@ -239,7 +331,7 @@ export function get_block_link_parts(client, path) {
     let location, link;
     if (client.mdraids[block.MDRaid]) {
         location = ["mdraid", client.mdraids[block.MDRaid].UUID];
-        link = cockpit.format(_("RAID device $0"), mdraid_name(client.mdraids[block.MDRaid]));
+        link = cockpit.format(_("MDRAID device $0"), mdraid_name(client.mdraids[block.MDRaid]));
     } else if (client.blocks_lvm2[path] &&
                client.lvols[client.blocks_lvm2[path].LogicalVolume] &&
                client.vgroups[client.lvols[client.blocks_lvm2[path].LogicalVolume].VolumeGroup]) {
@@ -252,7 +344,7 @@ export function get_block_link_parts(client, path) {
             location = ["vdo", vdo.name];
             link = cockpit.format(_("VDO device $0"), vdo.name);
         } else {
-            location = [block_name(block).replace(/^\/dev\//, "")];
+            location = [block_short_name(block)];
             if (client.drives[block.Drive])
                 link = drive_name(client.drives[block.Drive]);
             else
@@ -364,56 +456,55 @@ export function get_partitions(client, block) {
     return process_level(0, 0, block.Size);
 }
 
-export function get_available_spaces(client) {
-    function is_free(path) {
-        const block = client.blocks[path];
-        const block_ptable = client.blocks_ptable[path];
-        const block_part = client.blocks_part[path];
-        const block_pvol = client.blocks_pvol[path];
+export function is_available_block(client, block, honor_ignore_hint) {
+    const block_ptable = client.blocks_ptable[block.path];
+    const block_part = client.blocks_part[block.path];
+    const block_pvol = client.blocks_pvol[block.path];
 
-        function has_fs_label() {
-            if (!block.IdUsage)
-                return false;
-            // Devices with a LVM2_member label need to actually be
-            // associated with a volume group.
-            if (block.IdType == 'LVM2_member' && (!block_pvol || !client.vgroups[block_pvol.VolumeGroup]))
-                return false;
-            return true;
-        }
-
-        function is_mpath_member() {
-            if (!client.drives[block.Drive])
-                return false;
-            if (!client.drives_block[block.Drive]) {
-                // Broken multipath drive
-                return true;
-            }
-            const members = client.drives_multipath_blocks[block.Drive];
-            for (let i = 0; i < members.length; i++) {
-                if (members[i] == block)
-                    return true;
-            }
+    function has_fs_label() {
+        if (!block.IdUsage)
             return false;
-        }
-
-        function is_vdo_backing_dev() {
-            return !!client.legacy_vdo_overlay.find_by_backing_block(block);
-        }
-
-        function is_swap() {
-            return !!block && client.blocks_swap[path];
-        }
-
-        return (!block.HintIgnore &&
-                block.Size > 0 &&
-                !has_fs_label() &&
-                !is_mpath_member() &&
-                !is_vdo_backing_dev() &&
-                !is_swap() &&
-                !block_ptable &&
-                !(block_part && block_part.IsContainer));
+        // Devices with a LVM2_member label need to actually be
+        // associated with a volume group.
+        if (block.IdType == 'LVM2_member' && (!block_pvol || !client.vgroups[block_pvol.VolumeGroup]))
+            return false;
+        return true;
     }
 
+    function is_mpath_member() {
+        if (!client.drives[block.Drive])
+            return false;
+        if (!client.drives_block[block.Drive]) {
+            // Broken multipath drive
+            return true;
+        }
+        const members = client.drives_multipath_blocks[block.Drive];
+        for (let i = 0; i < members.length; i++) {
+            if (members[i] == block)
+                return true;
+        }
+        return false;
+    }
+
+    function is_vdo_backing_dev() {
+        return !!client.legacy_vdo_overlay.find_by_backing_block(block);
+    }
+
+    function is_swap() {
+        return !!block && client.blocks_swap[block.path];
+    }
+
+    return (!(block.HintIgnore && honor_ignore_hint) &&
+            block.Size > 0 &&
+            !has_fs_label() &&
+            !is_mpath_member() &&
+            !is_vdo_backing_dev() &&
+            !is_swap() &&
+            !block_ptable &&
+            !(block_part && block_part.IsContainer));
+}
+
+export function get_available_spaces(client) {
     function make(path) {
         const block = client.blocks[path];
         const parts = get_block_link_parts(client, path);
@@ -421,7 +512,7 @@ export function get_available_spaces(client) {
         return { type: 'block', block, size: block.Size, desc: text };
     }
 
-    const spaces = Object.keys(client.blocks).filter(is_free)
+    const spaces = Object.keys(client.blocks).filter(p => is_available_block(client, client.blocks[p], true))
             .sort(make_block_path_cmp(client))
             .map(make);
 
@@ -654,8 +745,58 @@ export function get_children(client, path) {
     return children;
 }
 
-export function get_active_usage(client, path, top_action, child_action) {
-    function get_usage(path, level) {
+export function find_children_for_mount_point(client, mount_point, self) {
+    const children = {};
+
+    function is_self(b) {
+        return self && (b == self || client.blocks[b.CryptoBackingDevice] == self);
+    }
+
+    for (const p in client.blocks) {
+        const b = client.blocks[p];
+        const fs = client.blocks_fsys[p];
+
+        if (is_self(b))
+            continue;
+
+        if (fs) {
+            for (const mp of fs.MountPoints) {
+                const mpd = decode_filename(mp);
+                if (mpd.length > mount_point.length && mpd.indexOf(mount_point) == 0 && mpd[mount_point.length] == "/")
+                    children[mpd] = b;
+            }
+        }
+    }
+
+    return children;
+}
+
+export function get_fstab_config_with_client(client, block, also_child_config) {
+    let config = block.Configuration.find(c => c[0] == "fstab");
+
+    if (!config && also_child_config && client.blocks_crypto[block.path])
+        config = client.blocks_crypto[block.path]?.ChildConfiguration.find(c => c[0] == "fstab");
+
+    if (config && decode_filename(config[1].type.v) != "swap") {
+        const mnt_opts = get_block_mntopts(config[1]).split(",");
+        let dir = decode_filename(config[1].dir.v);
+        let opts = mnt_opts
+                .filter(function (s) { return s.indexOf("x-parent") !== 0 })
+                .join(",");
+        const parents = mnt_opts
+                .filter(function (s) { return s.indexOf("x-parent") === 0 })
+                .join(",");
+        if (dir[0] != "/")
+            dir = "/" + dir;
+        if (opts == "defaults")
+            opts = "";
+        return [config, dir, opts, parents];
+    } else
+        return [];
+}
+
+export function get_active_usage(client, path, top_action, child_action, is_temporary) {
+    function get_usage(usage, path, level) {
         const block = client.blocks[path];
         const fsys = client.blocks_fsys[path];
         const mdraid = block && client.mdraids[block.MDRaidMember];
@@ -665,7 +806,7 @@ export function get_active_usage(client, path, top_action, child_action) {
         const stratis_blockdev = block && client.blocks_stratis_blockdev[path];
         const stratis_pool = stratis_blockdev && client.stratis_pools[stratis_blockdev.Pool];
 
-        const usage = flatten(get_children_for_teardown(client, path).map(p => get_usage(p, level + 1)));
+        get_children_for_teardown(client, path).map(p => get_usage(usage, p, level + 1));
 
         function get_actions(teardown_action) {
             const actions = [];
@@ -677,16 +818,38 @@ export function get_active_usage(client, path, top_action, child_action) {
             return actions;
         }
 
+        function enter_unmount(block, location, is_top) {
+            const [, mount_point] = get_fstab_config_with_client(client, block);
+            const has_fstab_entry = is_temporary && location == mount_point;
+
+            for (const u of usage) {
+                if (u.usage == 'mounted' && u.location == location) {
+                    if (is_top) {
+                        u.actions = get_actions(_("unmount"));
+                        u.set_noauto = false;
+                    }
+                    return;
+                }
+            }
+            usage.push({
+                level,
+                block,
+                usage: 'mounted',
+                location,
+                has_fstab_entry,
+                set_noauto: !is_top && !is_temporary,
+                actions: (is_top ? get_actions(_("unmount")) : [_("unmount")]).concat(has_fstab_entry ? [_("mount")] : []),
+                blocking: false
+            });
+        }
+
         if (fsys && fsys.MountPoints.length > 0) {
             fsys.MountPoints.forEach(mp => {
-                usage.push({
-                    level,
-                    usage: 'mounted',
-                    block,
-                    location: decode_filename(mp),
-                    actions: get_actions(_("unmount")),
-                    blocking: false,
-                });
+                const mpd = decode_filename(mp);
+                const children = find_children_for_mount_point(client, mpd, null);
+                for (const c in children)
+                    enter_unmount(children[c], c, false);
+                enter_unmount(block, mpd, true);
             });
         } else if (mdraid) {
             const active_state = mdraid.ActiveDevices.find(as => as[0] == block.path);
@@ -695,8 +858,8 @@ export function get_active_usage(client, path, top_action, child_action) {
                 usage: 'mdraid-member',
                 block,
                 mdraid,
-                location: mdraid_name(mdraid.Name),
-                actions: get_actions(_("remove from RAID")),
+                location: mdraid_name(mdraid),
+                actions: get_actions(_("remove from MDRAID")),
                 blocking: !(active_state && active_state[1] < 0)
             });
         } else if (vgroup) {
@@ -741,7 +904,8 @@ export function get_active_usage(client, path, top_action, child_action) {
         return usage;
     }
 
-    let usage = get_usage(path, 0);
+    let usage = [];
+    get_usage(usage, path, 0);
 
     if (usage.length == 1 && usage[0].level == 0 && usage[0].usage == "none")
         usage = [];
@@ -750,6 +914,37 @@ export function get_active_usage(client, path, top_action, child_action) {
     usage.Teardown = usage.some(u => !u.blocking);
 
     return usage;
+}
+
+async function set_fsys_noauto(client, block, mount_point) {
+    for (const conf of block.Configuration) {
+        if (conf[0] == "fstab" &&
+            decode_filename(conf[1].dir.v) == mount_point) {
+            const options = parse_options(get_block_mntopts(conf[1]));
+            if (options.indexOf("noauto") >= 0)
+                continue;
+            options.push("noauto");
+            const new_conf = [
+                "fstab",
+                Object.assign({ }, conf[1],
+                              {
+                                  opts: {
+                                      t: 'ay',
+                                      v: encode_filename(unparse_options(options))
+                                  }
+                              })
+            ];
+            await block.UpdateConfigurationItem(conf, new_conf, { });
+        }
+    }
+
+    const crypto_backing = client.blocks[block.CryptoBackingDevice];
+    if (crypto_backing) {
+        const crypto_backing_crypto = client.blocks_crypto[crypto_backing.path];
+        await set_crypto_auto_option(crypto_backing, false);
+        if (crypto_backing_crypto)
+            await crypto_backing_crypto.Lock({});
+    }
 }
 
 export function teardown_active_usage(client, usage) {
@@ -762,10 +957,12 @@ export function teardown_active_usage(client, usage) {
     // physical volumes here, and it is easiest to catch this
     // condition upfront by reshuffling the data structures.
 
-    function unmount(mounteds) {
-        return Promise.all(mounteds.map(m => {
-            return client.unmount_at(m.location, m.users);
-        }));
+    async function unmount(mounteds) {
+        for (const m of mounteds) {
+            await client.unmount_at(m.location, m.users);
+            if (m.set_noauto)
+                await set_fsys_noauto(client, m.block, m.location);
+        }
     }
 
     function mdraid_remove(members) {
@@ -800,6 +997,15 @@ export function teardown_active_usage(client, usage) {
         mdraid_remove(usage.filter(function(use) { return use.usage == "mdraid-member" })),
         pvol_remove(usage.filter(function(use) { return use.usage == "pvol" }))
     ));
+}
+
+export async function undo_temporary_teardown(client, usage) {
+    for (let i = usage.length - 1; i >= 0; i--) {
+        const u = usage[i];
+        if (u.usage == "mounted" && u.has_fstab_entry) {
+            await client.mount_at(u.block, u.location);
+        }
+    }
 }
 
 // TODO - generalize this to arbitrary number of arguments (when needed)

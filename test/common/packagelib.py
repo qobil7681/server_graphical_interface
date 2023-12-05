@@ -55,6 +55,7 @@ class PackageCase(MachineCase):
 
         # HACK: packagekit often hangs on shutdown; https://bugzilla.redhat.com/show_bug.cgi?id=1717185
         self.write_file("/etc/systemd/system/packagekit.service.d/timeout.conf", "[Service]\nTimeoutStopSec=5\n")
+        self.addCleanup(self.machine.execute, "systemctl stop packagekit; systemctl reset-failed packagekit || true")
 
         # disable all existing repositories to avoid hitting the network
         if self.backend == "apt":
@@ -120,6 +121,9 @@ Server = file://{empty_repo_dir}
 
         self.updateInfo = {}
 
+        # HACK: kpatch check sometimes complains that we don't set up a full repo in unrelated tests
+        self.allow_browser_errors("Could not determine kpatch packages:.*repodata updates was not complete")
+
     #
     # Helper functions for creating packages/repository
     #
@@ -157,8 +161,7 @@ Server = file://{empty_repo_dir}
             arch = self.primary_arch
         deb = f"{self.repo_dir}/{name}_{version}_{arch}.deb"
         if postinst:
-            postinstcode = "printf '#!/bin/sh\n{0}' > /tmp/b/DEBIAN/postinst; chmod 755 /tmp/b/DEBIAN/postinst".format(
-                postinst)
+            postinstcode = f"printf '#!/bin/sh\n{postinst}' > /tmp/b/DEBIAN/postinst; chmod 755 /tmp/b/DEBIAN/postinst"
         else:
             postinstcode = ''
         if content is not None:
@@ -215,33 +218,33 @@ Server = file://{empty_repo_dir}
                 if isinstance(data, dict):
                     installcmds += f"cp {data['path']} \"$RPM_BUILD_ROOT/{path}\""
                 else:
-                    installcmds += 'cat >"$RPM_BUILD_ROOT/{0}" <<\'EOF\'\n'.format(path) + data + '\nEOF\n'
+                    installcmds += f'cat >"$RPM_BUILD_ROOT/{path}" <<\'EOF\'\n' + data + '\nEOF\n'
                 installedfiles += f"{path}\n"
 
         architecture = ""
         if arch == self.primary_arch:
             architecture = f"BuildArch: {self.primary_arch}"
-        spec = """
-Summary: dummy {0}
-Name: {0}
-Version: {1}
-Release: {2}
+        spec = f"""
+Summary: dummy {name}
+Name: {name}
+Version: {version}
+Release: {release}
 License: BSD
-{8}
-{7}
-{4}
+{provides}
+{architecture}
+{requires}
 
 %%install
-{5}
+{installcmds}
 
 %%description
 Test package.
 
 %%files
-{6}
+{installedfiles}
 
-{3}
-""".format(name, version, release, postcode, requires, installcmds, installedfiles, architecture, provides)
+{postcode}
+"""
         self.machine.write("/tmp/spec", spec)
         cmd = """
 rpmbuild --quiet -bb /tmp/spec
@@ -343,31 +346,28 @@ post_upgrade() {{
             if info.get("cves"):
                 changes += "\n  * " + ", ".join(info["cves"])
 
-            path = "{0}/changelogs/{1}/{2}/{2}_{3}-{4}".format(self.repo_dir, pkg[0], pkg, ver, rel)
-            contents = """{0} ({1}-{2}) unstable; urgency=medium
+            path = f"{self.repo_dir}/changelogs/{pkg[0]}/{pkg}/{pkg}_{ver}-{rel}"
+            contents = f"""{pkg} ({ver}-{rel}) unstable; urgency=medium
 
-  * {3}
+  * {changes}
 
  -- Joe Developer <joe@example.com>  Wed, 31 May 2017 14:52:25 +0200
-""".format(pkg, ver, rel, changes)
-            self.machine.execute("mkdir -p $(dirname {0}); echo '{1}' > {0}".format(path, contents))
+"""
+            self.machine.execute(f"mkdir -p $(dirname {path}); echo '{contents}' > {path}")
 
     def createYumUpdateInfo(self):
         xml = '<?xml version="1.0" encoding="UTF-8"?>\n<updates>\n'
         for ((pkg, ver, rel), info) in self.updateInfo.items():
             refs = ""
             for b in info.get("bugs", []):
-                refs += '      <reference href="https://bugs.example.com?bug={0}" id="{0}" title="Bug#{0} Description" type="bugzilla"/>\n'.format(
-                    b)
+                refs += f'      <reference href="https://bugs.example.com?bug={b}" id="{b}" title="Bug#{b} Description" type="bugzilla"/>\n'
             for c in info.get("cves", []):
-                refs += '      <reference href="https://cve.mitre.org/cgi-bin/cvename.cgi?name={0}" id="{0}" title="{0}" type="cve"/>\n'.format(
-                    c)
+                refs += f'      <reference href="https://cve.mitre.org/cgi-bin/cvename.cgi?name={c}" id="{c}" title="{c}" type="cve"/>\n'
             if info.get("securitySeverity"):
                 refs += '      <reference href="https://access.redhat.com/security/updates/classification/#{0}" id="" title="" type="other"/>\n'.format(info[
                                                                                                                                                         "securitySeverity"])
             for e in info.get("errata", []):
-                refs += '      <reference href="https://access.redhat.com/errata/{0}" id="{0}" title="{0}" type="self"/>\n'.format(
-                    e)
+                refs += f'      <reference href="https://access.redhat.com/errata/{e}" id="{e}" title="{e}" type="self"/>\n'
 
             xml += """  <update from="test@example.com" status="stable" type="{severity}" version="2.0">
     <id>UPDATE-{pkg}-{ver}-{rel}</id>
@@ -397,19 +397,18 @@ post_upgrade() {{
     def enableRepo(self):
         if self.backend == "apt":
             self.createAptChangelogs()
-            self.machine.execute("""set -e; echo 'deb [trusted=yes] file://{0} /' > /etc/apt/sources.list.d/test.list
-                                    cd {0}; apt-ftparchive packages . > Packages
+            self.machine.execute(f"""echo 'deb [trusted=yes] file://{self.repo_dir} /' > /etc/apt/sources.list.d/test.list
+                                    cd {self.repo_dir}; apt-ftparchive packages . > Packages
                                     xz -c Packages > Packages.xz
                                     O=$(apt-ftparchive -o APT::FTPArchive::Release::Origin=cockpittest release .); echo "$O" > Release
                                     echo 'Changelogs: http://localhost:12345/changelogs/@CHANGEPATH@' >> Release
-                                    """.format(self.repo_dir))
+                                    """)
             pid = self.machine.spawn(f"cd {self.repo_dir}; exec python3 -m http.server 12345", "changelog")
             # pid will not be present for rebooting tests
             self.addCleanup(self.machine.execute, "kill %i || true" % pid)
             self.machine.wait_for_cockpit_running(port=12345)  # wait for changelog HTTP server to start up
         elif self.backend == "alpm":
-            self.machine.execute(f"""set -e;
-                                     cd {self.repo_dir}
+            self.machine.execute(f"""cd {self.repo_dir}
                                      repo-add {self.repo_dir}/testrepo.db.tar.gz *.pkg.tar.zst
                     """)
 
@@ -422,7 +421,7 @@ Server = file://{self.repo_dir}
                 self.machine.write("/etc/pacman.conf", config, append=True)
 
         else:
-            self.machine.execute("""set -e; printf '[updates]\nname=cockpittest\nbaseurl=file://{0}\nenabled=1\ngpgcheck=0\n' > /etc/yum.repos.d/cockpittest.repo
+            self.machine.execute("""printf '[updates]\nname=cockpittest\nbaseurl=file://{0}\nenabled=1\ngpgcheck=0\n' > /etc/yum.repos.d/cockpittest.repo
                                     echo '{1}' > /tmp/updateinfo.xml
                                     createrepo_c {0}
                                     modifyrepo_c /tmp/updateinfo.xml {0}/repodata

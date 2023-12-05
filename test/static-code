@@ -1,12 +1,14 @@
 #!/bin/bash
-# run static code checks like flake8, pyvulture.
+# run static code checks like eslint, flake8, mypy, ruff, vulture.
 
 set -eu
 
+# requires: .flake8
 # requires: pyproject.toml
 # requires: containers/flatpak/test/ruff.toml
 # requires: pkg/ruff.toml
 # requires: test/common/ruff.toml
+# requires: test/example/ruff.toml
 # requires: test/verify/ruff.toml
 # requires: tools/vulture-suppressions/ruff.toml
 
@@ -18,11 +20,11 @@ set -eu
 # note: `set -e` is not active during the tests.
 
 find_scripts() {
-    # Helper to find all Python files in the tree
+    # Helper to find all scripts in the tree
     (
-        # Any non-binary file which contains a python3 shebang
+        # Any non-binary file which contains a given shebang
         git grep --cached -lIz '^#!.*'"$1"
-        # Any file ending in '.py'
+        # Any file matching the provided glob
         git ls-files -z "$2"
     ) | sort -z | uniq -z
 }
@@ -42,12 +44,24 @@ test_ruff() {
 }
 
 if [ "${WITH_PARTIAL_TREE:-0}" = 0 ]; then
-    test_pyvulture() {
+    test_mypy() {
+        command -v mypy >/dev/null || skip 'no mypy'
+        for pkg in systemd_ctypes ferny bei; do
+            test -e "src/cockpit/_vendor/${pkg}/__init__.py" || skip "no ${pkg}"
+        done
+        mypy --no-error-summary src/cockpit test/pytest
+        # test scripts individually, to avoid clashing on `__main__`
+        # also skip integration tests, they are too big and not annotated
+        find_scripts 'python3' "*.none" | grep -zv 'test/' | xargs -r -0 -n1 mypy --no-error-summary
+    }
+
+    test_vulture() {
         # vulture to find unused variables/functions
         command -v vulture >/dev/null || skip 'no vulture'
         find_python_files | xargs -r -0 vulture
     }
 fi
+
 
 test_js_translatable_strings() {
     # Translatable strings must be marked with _(""), not _('')
@@ -58,7 +72,7 @@ test_js_translatable_strings() {
 if [ "${WITH_PARTIAL_TREE:-0}" = 0 ]; then
     test_eslint() {
         test -x node_modules/.bin/eslint -a -x /usr/bin/node || skip 'no eslint'
-        find_scripts 'node' '*.js?' | xargs -0 node_modules/.bin/eslint
+        find_scripts 'node' '*.js' '*.js?' | xargs -0 node_modules/.bin/eslint
     }
 fi
 
@@ -136,7 +150,7 @@ main() {
     tests=($(compgen -A function 'test_'))
     [ -n "${tap}" ] && printf "1..%d\n" "${#tests[@]}"
 
-    for test_function in ${tests[@]}; do
+    for test_function in "${tests[@]}"; do
         path="/static-code/$(echo ${test_function} | tr '_' '-')"
         counter=$((counter + 1))
         fail=''

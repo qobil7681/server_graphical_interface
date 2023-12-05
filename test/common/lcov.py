@@ -29,6 +29,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from bisect import bisect_left
@@ -90,7 +91,7 @@ def parse_sourcemap(f, line_starts, dir_name):
 
     our_sources = set()
     for s in sources:
-        if "node_modules" not in s and (s.endswith(".js") or s.endswith(".jsx")):
+        if "node_modules" not in s and (s.endswith(('.js', '.jsx'))):
             our_sources.add(s)
 
     dst_col, src_id, src_line = 0, 0, 0
@@ -260,7 +261,7 @@ class DiffMap:
         return None
 
     def find_source(self, diff_line):
-        return self.source_map[diff_line]
+        return self.source_map.get(diff_line)
 
 
 def print_diff_coverage(path, file_hits, out):
@@ -424,7 +425,10 @@ def get_review_comments(diff_info_file):
             if line.startswith("DA:"):
                 parts = line[3:].split(",")
                 if int(parts[1]) == 0:
-                    (src, line, text) = dm.find_source(int(parts[0]))
+                    info = dm.find_source(int(parts[0]))
+                    if not info:
+                        continue
+                    (src, line, text) = info
                     if not is_interesting_line(text):
                         continue
                     if src == cur_src and line == cur_line + 1:
@@ -442,22 +446,34 @@ def get_review_comments(diff_info_file):
 def prepare_for_code_coverage():
     # This gives us a convenient link at the top of the logs, see link-patterns.json
     print("Code coverage report in Coverage/index.html")
-    os.makedirs("lcov", exist_ok=True)
+    if os.path.exists("lcov"):
+        shutil.rmtree("lcov")
+    os.makedirs("lcov")
+    # Detect the default branch to compare with, Anaconda still uses master as main.
+    branch = "main"
+    try:
+        subprocess.check_call(["git", "rev-parse", "--quiet", "--verify", branch], stdout=subprocess.DEVNULL)
+    except subprocess.SubprocessError:
+        branch = "master"
     with open("lcov/github-pr.diff", "w") as f:
-        subprocess.check_call(["git", "-c", "diff.noprefix=false", "diff", "--patience", "main"], stdout=f)
+        subprocess.check_call(["git", "-c", "diff.noprefix=false", "diff", "--patience", branch], stdout=f)
 
 
 def create_coverage_report():
     output = os.environ.get("TEST_ATTACHMENTS", BASE_DIR)
     lcov_files = glob.glob(f"{BASE_DIR}/lcov/*.info.gz")
     try:
-        title = os.path.basename(subprocess.check_output(["git", "remote", "get-url", "origin"]))
+        title = os.path.basename(subprocess.check_output(["git", "remote", "get-url", "origin"])).decode().strip()
     except subprocess.CalledProcessError:
         title = "?"
     if len(lcov_files) > 0:
         all_file = f"{BASE_DIR}/lcov/all.info"
         diff_file = f"{BASE_DIR}/lcov/diff.info"
-        subprocess.check_call(["lcov", "--quiet", "--output", all_file,
+        excludes = []
+        # Exclude pkg/lib in Cockpit projects such as podman/machines.
+        if title != "cockpit.git":
+            excludes = ["--exclude", "pkg/lib"]
+        subprocess.check_call(["lcov", "--quiet", "--output", all_file, *excludes,
                                *itertools.chain(*[["--add", f] for f in lcov_files])])
         subprocess.check_call(["lcov", "--quiet", "--output", diff_file,
                                "--extract", all_file, "*/github-pr.diff"])
