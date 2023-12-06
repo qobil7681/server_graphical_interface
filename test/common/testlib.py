@@ -2173,7 +2173,7 @@ class MachineCase(unittest.TestCase):
         else:
             self.machine.reboot(timeout_sec=timeout_sec)
         
-    def wait_reboot(self, timeout_sec::Optional[int]=None):
+    def wait_reboot(self, timeout_sec:Optional[int]=None):
         self.allow_restart_journal_messages()
         if timeout_sec is None:
             self.machine.reboot()
