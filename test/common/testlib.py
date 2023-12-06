@@ -2165,7 +2165,7 @@ class MachineCase(unittest.TestCase):
         m = self.machine
         self.restore_file(path, post_restore_action=post_restore_action)
         m.write(path, content, append=append, owner=owner, perm=perm)
-        
+               
     def reboot(self, timeout_sec:Optional[int] = None): 
         self.allow_restart_journal_messages()
         if timeout_sec is None:
