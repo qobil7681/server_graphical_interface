@@ -38,6 +38,7 @@ import { PlotState } from 'plot';
 
 import { useObject, useEvent, usePageLocation } from "hooks";
 import { WithDialogs } from "dialogs.jsx";
+import { usePolkitPermissions } from '../lib/hooks.js';
 
 const _ = cockpit.gettext;
 
@@ -56,6 +57,17 @@ const App = () => {
     const { path } = usePageLocation();
 
     useEvent(superuser, "changed");
+    const polkitPermissions = usePolkitPermissions([
+        'org.freedesktop.NetworkManager.reload',
+        'org.freedesktop.NetworkManager.checkpoint-rollback',
+        'org.freedesktop.NetworkManager.network-control',
+        'org.freedesktop.NetworkManager.settings.modify.global-dns',
+        'org.freedesktop.NetworkManager.settings.modify.hostname',
+        'org.freedesktop.NetworkManager.settings.modify.own',
+        'org.freedesktop.NetworkManager.settings.modify.system'
+    ]);
+
+    const polkitAllowed = polkitPermissions.every((permission) => permission);
 
     const usage_monitor = useObject(() => new UsageMonitor(), null, []);
     const plot_state_main = useObject(() => new PlotState(), null, []);
@@ -117,7 +129,7 @@ const App = () => {
         return (
             <ModelContext.Provider value={model}>
                 <WithDialogs key="1">
-                    <NetworkPage privileged={superuser.allowed}
+                    <NetworkPage privileged={superuser.allowed || polkitAllowed}
                                  operationInProgress={model.operationInProgress}
                                  usage_monitor={usage_monitor}
                                  plot_state={plot_state_main}
@@ -132,7 +144,7 @@ const App = () => {
             return (
                 <ModelContext.Provider value={model}>
                     <WithDialogs key="2">
-                        <NetworkInterfacePage privileged={superuser.allowed}
+                        <NetworkInterfacePage privileged={superuser.allowed || polkitAllowed}
                                               operationInProgress={model.operationInProgress}
                                               usage_monitor={usage_monitor}
                                               plot_state={plot_state_iface}
