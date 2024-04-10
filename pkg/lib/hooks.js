@@ -324,3 +324,36 @@ export function useEvent(obj, event, handler) {
 export function useInit(func, deps, comps, destroy = null) {
     return useObject(func, destroy, deps || [], comps);
 }
+
+/* - usePolkitPermissions(actions)
+*
+ * function Component(arg) {
+ *   const permissions = usePolkitPermissions([
+ *     'org.freedesktop.NetworkManager.reload',
+ *     'org.freedesktop.NetworkManager.network-control'
+ *   ]);
+ *
+ *   ...
+ *  }
+ *
+ * The returned value from the hook is an array of booleans,
+ * in the order that they were specified, specifying if the
+ * action is allowed or not.
+ * ]);
+*/
+export function usePolkitPermissions(actions) {
+    const [permissions, setPermissions] = useState([]);
+
+    useEffect(() => {
+        Promise.allSettled(actions.map((action) =>
+            // pkcheck returns a 0 status code if the check passed
+            cockpit.spawn(['sh', '-c', `pkcheck --action-id ${action} --process $$ --allow-user-interaction 2>&1`])
+        )).then((results) => {
+            setPermissions(results.map((result) =>
+                result.status === 'fulfilled'));
+        });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [JSON.stringify(actions)]);
+
+    return permissions;
+}
