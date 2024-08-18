@@ -173,7 +173,7 @@ def main(args):
 
     host = args[1]
     key_env = f"COCKPIT_SSH_KEY_PATH_{host.upper()}"
-    key_name = os.environ.get(key_env)
+    key_name = os.environ.get(key_env) or os.environ.get("COCKPIT_SSH_KEY_PATH")
     if key_name:
         send_auth_command("*", None)
         try:
