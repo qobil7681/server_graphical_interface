@@ -406,6 +406,8 @@ authentication via sssd/FreeIPA.
 %{_unitdir}/cockpit-motd.service
 %{_unitdir}/cockpit.socket
 %{_unitdir}/cockpit-ws-user.service
+%{_unitdir}/cockpit-session.socket
+%{_unitdir}/cockpit-session@.service
 %{_unitdir}/cockpit-wsinstance-http.socket
 %{_unitdir}/cockpit-wsinstance-http.service
 %{_unitdir}/cockpit-wsinstance-https-factory.socket
@@ -425,7 +427,7 @@ authentication via sssd/FreeIPA.
 %{_libexecdir}/cockpit-desktop
 %{_libexecdir}/cockpit-certificate-ensure
 %{_libexecdir}/cockpit-certificate-helper
-%attr(4750, root, cockpit-wsinstance) %{_libexecdir}/cockpit-session
+%{_libexecdir}/cockpit-session
 %{_datadir}/cockpit/branding
 %{_datadir}/selinux/packages/%{selinuxtype}/%{name}.pp.bz2
 %{_mandir}/man8/%{name}_session_selinux.8cockpit.*
@@ -588,8 +590,6 @@ These files are not required for running Cockpit.
 
 %files -n cockpit-tests -f tests.list
 %{pamdir}/mock-pam-conv-mod.so
-%{_unitdir}/cockpit-session.socket
-%{_unitdir}/cockpit-session@.service
 
 %if %{build_pcp}
 
