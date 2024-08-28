@@ -238,12 +238,12 @@ export function validate_fsys_label(label, type) {
     }
 }
 
-export function block_name(block) {
+export function block_long_name(block) {
     return decode_filename(block.PreferredDevice);
 }
 
-export function block_short_name(block) {
-    return block_name(block).replace(/^\/dev\//, "");
+export function block_name(block) {
+    return block_long_name(block).replace(/^\/dev\//, "");
 }
 
 export function mdraid_name(mdraid) {
@@ -340,7 +340,7 @@ export function get_block_link_parts(client, path) {
             location = ["vdo", vdo.name];
             link = cockpit.format(_("VDO device $0"), vdo.name);
         } else {
-            location = [block_short_name(block)];
+            location = [block_name(block)];
             if (client.drives[block.Drive])
                 link = drive_name(client.drives[block.Drive]);
             else

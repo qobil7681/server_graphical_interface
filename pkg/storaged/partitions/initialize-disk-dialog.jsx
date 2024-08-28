@@ -22,7 +22,7 @@ import client from "../client";
 
 import {
     dialog_open,
-    SelectOneRadioVertical,
+    SelectOneRadio,
     BlockingMessage, TeardownMessage,
     init_teardown_usage
 } from "../dialog.jsx";
@@ -48,8 +48,9 @@ export function initialize_disk_dialog(block) {
         Title: cockpit.format(_("Initialize $0 for partitions"), block_name(block)),
         Teardown: TeardownMessage(usage),
         Fields: [
-            SelectOneRadioVertical("type", _("Type"),
+            SelectOneRadio("type", _("Type"),
                       {
+                          vertical: true,
                           value: "gpt",
                           choices: [
                               { value: "gpt", title: _("Modern (GPT)") },

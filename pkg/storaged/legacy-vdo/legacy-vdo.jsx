@@ -25,7 +25,7 @@ import { Alert } from "@patternfly/react-core/dist/esm/components/Alert/index.js
 import { Card, CardBody } from '@patternfly/react-core/dist/esm/components/Card/index.js';
 import { DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm } from "@patternfly/react-core/dist/esm/components/DescriptionList/index.js";
 
-import { block_short_name, get_active_usage, teardown_active_usage, fmt_size, decode_filename, reload_systemd } from "../utils.js";
+import { block_name, get_active_usage, teardown_active_usage, fmt_size, decode_filename, reload_systemd } from "../utils.js";
 import {
     dialog_open, SizeSlider, BlockingMessage, TeardownMessage, init_teardown_usage
 } from "../dialog.jsx";
@@ -140,7 +140,7 @@ export function make_legacy_vdo_page(parent, vdo, backing_block, next_card) {
         title: cockpit.format(_("VDO device $0"), vdo.name),
         next: next_card,
         page_location: ["vdo", vdo.name],
-        page_name: block_short_name(backing_block),
+        page_name: block_name(backing_block),
         page_size: vdo.logical_size,
         job_path: backing_block.path,
         component: VDODetails,
