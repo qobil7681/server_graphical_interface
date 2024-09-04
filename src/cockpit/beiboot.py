@@ -21,7 +21,10 @@ import base64
 import importlib.resources
 import logging
 import os
+import re
 import shlex
+import tempfile
+import time
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence
 
@@ -35,7 +38,7 @@ from cockpit.channels import PackagesChannel
 from cockpit.jsonutil import JsonObject, get_str
 from cockpit.packages import Packages, PackagesLoader, patch_libexecdir
 from cockpit.peer import Peer
-from cockpit.protocol import CockpitProblem
+from cockpit.protocol import CockpitProblem, CockpitProtocolError
 from cockpit.router import Router, RoutingRule
 from cockpit.transports import StdioTransport
 
@@ -129,10 +132,25 @@ class AuthorizeResponder(ferny.AskpassHandler):
     commands = ('ferny.askpass', 'cockpit.report-exists')
     router: Router
 
-    def __init__(self, router: Router):
+    def __init__(self, router: Router, basic_password: Optional[str]):
         self.router = router
+        self.basic_password = basic_password
+        self.have_basic_password = bool(basic_password)
 
     async def do_askpass(self, messages: str, prompt: str, hint: str) -> Optional[str]:
+        logger.debug("AuthorizeResponder: prompt %r, messages %r, hint %r", prompt, messages, hint)
+
+        if self.have_basic_password and 'password:' in prompt.lower():
+            # with our NumberOfPasswordPrompts=1 ssh should never actually ask us more than once; assert that
+            if self.basic_password is None:
+                raise CockpitProtocolError(
+                    f"ssh asked for password a second time, but we already sent it; prompt: {messages}")
+
+            logger.debug("AuthorizeResponder: sending Basic auth password for prompt %r", prompt)
+            reply = self.basic_password
+            self.basic_password = None
+            return reply
+
         if hint == 'none':
             # We have three problems here:
             #
@@ -150,14 +168,35 @@ class AuthorizeResponder(ferny.AskpassHandler):
             # Let's avoid all of that by just showing nothing.
             return None
 
-        challenge = 'X-Conversation - ' + base64.b64encode(prompt.encode()).decode()
+        # FIXME: is this a host key prompt? This should be handled more elegantly,
+        # see https://github.com/cockpit-project/cockpit/pull/19668
+        fp_match = re.search(r'\n(\w+) key fingerprint is ([^.]+)\.', prompt)
+        # let ssh resolve aliases, don't use our original "destination"
+        host_match = re.search(r"authenticity of host '([^ ]+) ", prompt)
+        args = {}
+        if fp_match and host_match:
+            # login.js do_hostkey_verification() expects host-key to be "hostname keytype key"
+            # we don't have access to the full key yet (that will be sent later as `login-data` challenge response),
+            # so just send a placeholder
+            args['host-key'] = f'{host_match.group(1)} {fp_match.group(1)} login-data'
+            # very oddly named, login.js do_hostkey_verification() expects the fingerprint here for user confirmation
+            args['default'] = fp_match.group(2)
+
+        challenge_id = f'{os.getpid()}-{time.time()}'
+        challenge_prefix = f'X-Conversation {challenge_id}'
+        challenge = challenge_prefix + ' ' + base64.b64encode(prompt.encode()).decode()
         response = await self.router.request_authorization(challenge,
+                                                           timeout=None,
                                                            messages=messages,
                                                            prompt=prompt,
                                                            hint=hint,
-                                                           echo=False)
+                                                           echo=False,
+                                                           **args)
 
-        b64 = response.removeprefix('X-Conversation -').strip()
+        if not response.startswith(challenge_prefix):
+            raise CockpitProtocolError(
+                f"AuthorizeResponder: response {response} does not match challenge {challenge_prefix}")
+        b64 = response.removeprefix(challenge_prefix).strip()
         response = base64.b64decode(b64.encode()).decode()
         logger.debug('Returning a %d chars response', len(response))
         return response
@@ -210,6 +249,8 @@ class SshPeer(Peer):
     def __init__(self, router: Router, destination: str, args: argparse.Namespace):
         self.destination = destination
         self.always = args.always
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.known_hosts_file = Path(self.tmpdir.name) / 'user-known-hosts'
         super().__init__(router)
 
     async def do_connect_transport(self) -> None:
@@ -234,17 +275,21 @@ class SshPeer(Peer):
 
     async def connect_from_bastion_host(self) -> None:
         basic_password = None
-        username_opts = []
+        known_hosts = None
+        # right now we open a new ssh connection for each auth attempt
+        args = ['-o', 'NumberOfPasswordPrompts=1']
 
         # do we have user/password (Basic auth) from the login page?
         auth = await self.router.request_authorization_object("*")
         response = get_str(auth, 'response')
 
         if response.startswith('Basic '):
-            user, basic_password = base64.b64decode(response.split(' ', 1)[1]).decode().split(':', 1)
+            decoded = base64.b64decode(response[6:]).decode()
+            user_password, _, known_hosts = decoded.partition('\0')
+            user, _, basic_password = user_password.partition(':')
             if user:  # this can be empty, i.e. auth is just ":"
                 logger.debug("got username %s and password from Basic auth", user)
-                username_opts = ['-l', user]
+                args += ['-l', user]
 
         # We want to run a python interpreter somewhere...
         cmd, env = python_interpreter('cockpit-bridge')
@@ -256,12 +301,16 @@ class SshPeer(Peer):
         if not ssh_askpass.exists():
             logger.error("Could not find cockpit-askpass helper at %r", askpass)
 
-        cmd, env = via_ssh(cmd, self.destination, ssh_askpass, *username_opts)
+        if known_hosts is not None:
+            self.known_hosts_file.write_text(known_hosts)
+            args += ['-o', f'UserKnownHostsfile={self.known_hosts_file!s}']
+        cmd, env = via_ssh(cmd, self.destination, ssh_askpass, *args)
+
         await self.boot(cmd, env, basic_password)
 
     async def boot(self, cmd: Sequence[str], env: Sequence[str], basic_password: 'str | None' = None) -> None:
         beiboot_helper = BridgeBeibootHelper(self)
-        agent = ferny.InteractionAgent([AuthorizeResponder(self.router), beiboot_helper])
+        agent = ferny.InteractionAgent([AuthorizeResponder(self.router, basic_password), beiboot_helper])
 
         logger.debug("Launching command: cmd=%s env=%s", cmd, env)
         transport = await self.spawn(cmd, env, stderr=agent, start_new_session=True)
@@ -330,6 +379,13 @@ async def run(args) -> None:
     try:
         message = dict(await bridge.ssh_peer.start())
 
+        if bridge.ssh_peer.known_hosts_file.exists():
+            bridge.write_control(
+                command='authorize', challenge='x-login-data', cookie='-', login_data={
+                    'known-hosts': bridge.ssh_peer.known_hosts_file.read_text()
+                }
+            )
+
         # See comment in do_init() above: we tell cockpit-ws that we support
         # this and then handle it ourselves when we get the init message.
         capabilities = message.setdefault('capabilities', {})
@@ -359,7 +415,12 @@ async def run(args) -> None:
             problem = 'unknown-host'
         else:
             problem = 'internal-error'
-        bridge.write_control(command='init', problem=problem, message=str(error))
+        # if the user confirmed a new SSH host key before the error, tell the UI
+        if bridge.ssh_peer.known_hosts_file.exists():
+            bridge.write_control(command='init', problem=problem, message=str(error),
+                                 known_hosts=bridge.ssh_peer.known_hosts_file.read_text())
+        else:
+            bridge.write_control(command='init', problem=problem, message=str(error))
         return
     except CockpitProblem as exc:
         logger.debug("CockpitProblem: %s", exc)
