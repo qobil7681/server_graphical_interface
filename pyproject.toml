@@ -31,6 +31,10 @@ module = [
     "libvirt_qemu",
     "pika",
 
+    # run without pcp module types
+    "pcp",
+    "cpmapi",
+
     # run without gobject-introspection (used from cockpit-client for Gtk)
     "gi.*",
 
@@ -196,10 +200,13 @@ labels =
 sitepackages = True
 install_command = python3 -m pip install --no-index --no-build-isolation {opts} {packages}
 wheel_build_env = pkg
+setenv =
+  NO_QUNIT=1
 
 # All other environments (names like py311-lint, py36-pytest, etc) are isolated
 # from the system and get their packages from PyPI, according to the specific
 # test environment being requested.  We build the wheel in a common environment.
+# Skip PCP as the PyPi package provides no wheel, requires compilation and is outdated (5.0)
 [testenv]
 package = wheel
 wheel_build_env = venv-pkg
@@ -216,6 +223,7 @@ deps =
 allowlist_externals = test/static-code
 setenv =
   NO_QUNIT=1
+  PYTEST_ADDOPTS=-k 'not pcp'
 commands =
   pytest: python3 -m pytest -opythonpath= {posargs}
   lint: test/static-code --tap
